@@ -85,10 +85,11 @@ func (l *Logger) Printf(format string, vals ...interface{}) {
 // with the new registry can be started.
 func checkHealth(proxy *srp.ReverseProxy, reload <-chan bool) {
 	client := &http.Client{Timeout: timeout}
-	tickChan := time.NewTicker(3 * time.Second).C
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
-		case <-tickChan:
+		case <-ticker.C:
 			err := proxy.CheckHealth(client)
 			if err != nil {
 				log.Println("failed to check health:", err)
