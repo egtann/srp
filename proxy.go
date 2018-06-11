@@ -26,7 +26,6 @@ type ReverseProxy struct {
 	resultCh chan *healthCheck
 	mu       sync.RWMutex
 	log      Logger
-	shutdown bool
 }
 
 // Registry maps hosts to backends with other helpful info, such as
@@ -146,9 +145,6 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	}
 	go func() {
 		for _, check := range checks {
-			if r.shutdown {
-				return
-			}
 			r.jobCh <- check
 		}
 	}()
@@ -172,12 +168,6 @@ func (r *ReverseProxy) UpdateRegistry(reg Registry) {
 	defer r.mu.Unlock()
 	r.reg = reg
 	r.rp.Transport = newTransport(reg)
-}
-
-// Shutdown stops future healthchecks from running.
-func (r *ReverseProxy) Shutdown() {
-	r.shutdown = true
-	close(r.jobCh)
 }
 
 func ping(job *healthCheck) error {
