@@ -106,12 +106,14 @@ func (r Registry) clone() Registry {
 func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	checks := []*healthCheck{}
 	regClone := r.reg.clone()
+	changed := false
 	r.mu.RLock()
 	for host, frontend := range regClone {
 		if frontend.HealthPath == "" {
 			frontend.liveBackends = frontend.Backends
 			continue
 		}
+		changed = true
 		frontend.liveBackends = []string{}
 		for _, ip := range frontend.Backends {
 			checks = append(checks, &healthCheck{
@@ -131,11 +133,7 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	for i := 0; i < max; i++ {
 		go ping(jobCh, resultCh)
 	}
-	changed := false
 	for _, check := range checks {
-		if len(check.healthPath) > 0 {
-			changed = true
-		}
 		jobCh <- check
 	}
 	for i := 0; i < len(checks); i++ {
