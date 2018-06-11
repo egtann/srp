@@ -84,7 +84,7 @@ func main() {
 	sighupCh := make(chan bool)
 	go hotReloadConfig(*config, proxy, sighupCh)
 	go checkHealth(proxy, sighupCh)
-	gracefulRestart(srv, proxy, timeout)
+	gracefulRestart(srv, timeout)
 }
 
 // Logger implements the srp.Logger interface.
@@ -137,18 +137,13 @@ func hotReloadConfig(
 // received, it stops accepting new connections and allows all existing
 // connections up to 10 seconds to complete. If connections do not shut down in
 // time, this exits with 1.
-func gracefulRestart(
-	srv *http.Server,
-	proxy *srp.ReverseProxy,
-	timeout time.Duration,
-) {
+func gracefulRestart(srv *http.Server, timeout time.Duration) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Println("shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	proxy.Shutdown()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Println("failed to shutdown server gracefully", err)
 		os.Exit(1)
