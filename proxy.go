@@ -124,7 +124,7 @@ func (r Registry) clone() Registry {
 
 // CheckHealth of backend servers in the registry concurrently, and update the
 // registry so requests are only routed to healthy servers.
-func (r *ReverseProxy) CheckHealth(client *http.Client) {
+func (r *ReverseProxy) CheckHealth() {
 	checks := []*healthCheck{}
 	regClone := r.reg.clone()
 	for host, frontend := range regClone {
