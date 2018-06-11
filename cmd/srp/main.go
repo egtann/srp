@@ -59,6 +59,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}()
+	proxy.CheckHealth(&http.Client{Timeout: timeout})
 	reload := make(chan bool)
 	go hotReloadConfig(*config, proxy, reload)
 	go checkHealth(proxy, reload)
