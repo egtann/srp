@@ -133,7 +133,10 @@ func newTransport(reg Registry) http.RoundTripper {
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		Dial: func(network, addr string) (net.Conn, error) {
-			endpoints := reg[addr].Backends
+			endpoints := reg[addr].liveBackends
+			if len(endpoints) == 0 {
+				return nil, fmt.Errorf("no live backend for %s", addr)
+			}
 			randInt := rand.Int()
 			endpoint := endpoints[randInt%len(endpoints)]
 			conn, err := net.Dial(network, endpoint)
