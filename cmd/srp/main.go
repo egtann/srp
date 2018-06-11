@@ -32,8 +32,12 @@ func main() {
 	}
 	proxy := srp.NewProxy(&Logger{}, reg)
 
-	// Start the proxy using SSL if possible
-	var srv *http.Server
+	srv := &http.Server{
+		Handler:        proxy,
+		ReadTimeout:    timeout,
+		WriteTimeout:   timeout,
+		MaxHeaderBytes: 1 << 20,
+	}
 	var port string
 	if len(*sslURL) > 0 {
 		hosts := append(reg.Hosts(), *sslURL)
@@ -41,25 +45,13 @@ func main() {
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(hosts...),
 		}
+		srv.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate}
 		go http.ListenAndServe(":http", m.HTTPHandler(nil))
-		srv = &http.Server{
-			Addr:           ":https",
-			Handler:        proxy,
-			TLSConfig:      &tls.Config{GetCertificate: m.GetCertificate},
-			ReadTimeout:    timeout,
-			WriteTimeout:   timeout,
-			MaxHeaderBytes: 1 << 20,
-		}
+		srv.Addr = ":https"
 		port = "443"
 	} else {
 		port = strings.TrimLeft(*portTmp, ":")
-		srv = &http.Server{
-			Addr:           ":" + port,
-			Handler:        proxy,
-			ReadTimeout:    10 * time.Second,
-			WriteTimeout:   10 * time.Second,
-			MaxHeaderBytes: 1 << 20,
-		}
+		srv.Addr = ":" + port
 	}
 	go func() {
 		log.Println("listening on", port)
@@ -90,11 +82,7 @@ func checkHealth(proxy *srp.ReverseProxy, reload <-chan bool) {
 	for {
 		select {
 		case <-ticker.C:
-			err := proxy.CheckHealth(client)
-			if err != nil {
-				log.Println("failed to check health:", err)
-				continue
-			}
+			proxy.CheckHealth(client)
 		case <-reload:
 			return
 		}
@@ -113,8 +101,8 @@ func hotReloadConfig(filename string, proxy *srp.ReverseProxy, reload chan bool)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("reloaded config")
 	proxy.UpdateRegistry(reg)
+	log.Println("reloaded config")
 	reload <- true
 	go checkHealth(proxy, reload)
 	hotReloadConfig(filename, proxy, reload)
@@ -128,12 +116,12 @@ func gracefulRestart(srv *http.Server, timeout time.Duration) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
-	log.Println("shutdown started")
+	log.Println("shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Println("failed to shutdown server gracefully", err)
 		os.Exit(1)
 	}
-	log.Println("shutdown completed")
+	log.Println("shut down")
 }

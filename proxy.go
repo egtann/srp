@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 )
 
+// ReverseProxy
 type ReverseProxy struct {
 	rp  httputil.ReverseProxy
 	reg Registry
@@ -22,14 +23,25 @@ type ReverseProxy struct {
 	log Logger
 }
 
+// Registry maps hosts to backends with other helpful info, such as
+// healthchecks.
 type Registry map[string]*struct {
 	HealthPath   string
 	Backends     []string
 	liveBackends []string
 }
 
+// Logger logs error messages for the caller where those errors don't require
+// returning, i.e. the logging itself constitutes handling the error.
 type Logger interface {
 	Printf(format string, vals ...interface{})
+}
+
+type healthCheck struct {
+	host       string
+	ip         string
+	healthPath string
+	err        error
 }
 
 // NewProxy from a given Registry.
@@ -37,6 +49,7 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 	director := func(req *http.Request) {
 		req.URL.Scheme = "http"
 		req.URL.Host = req.Host
+		log.Printf("%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
 	}
 	transport := newTransport(reg)
 	rp := httputil.ReverseProxy{Director: director, Transport: transport}
@@ -79,54 +92,108 @@ func (r Registry) Hosts() []string {
 	return hosts
 }
 
+func (r Registry) clone() Registry {
+	clone := Registry{}
+	for k, v := range r {
+		clone[k] = v
+	}
+	return clone
+}
+
 // CheckHealth of backend servers in the registry concurrently, up to 10 at a
 // time. If an unexpected error is returned during any of the checks,
 // CheckHealth immediately exits, reporting that error.
-func (r *ReverseProxy) CheckHealth(client *http.Client) error {
-	regClone := Registry{}
-	for k, v := range r.reg {
-		regClone[k] = v
-	}
-	changed := false
-	semaphore := make(chan int, 10)
+func (r *ReverseProxy) CheckHealth(client *http.Client) {
+	checks := []*healthCheck{}
+	r.mu.RLock()
+	regClone := r.reg.clone()
 	for host, frontend := range regClone {
-		if len(frontend.HealthPath) == 0 {
+		if frontend.HealthPath == "" {
+			frontend.liveBackends = frontend.Backends
 			continue
 		}
-		changed = true
-		liveBackends := []string{}
-		ipchan := make(chan string)
-		errchan := make(chan error, 1)
+		frontend.liveBackends = []string{}
 		for _, ip := range frontend.Backends {
-			target := "http://" + ip + frontend.HealthPath
-			semaphore <- 1
-			go ping(client, ip, target, semaphore, ipchan, errchan)
+			checks = append(checks, &healthCheck{
+				host:       host,
+				ip:         ip,
+				healthPath: frontend.HealthPath,
+			})
 		}
-		f := regClone[host]
-		for i := 0; i < len(frontend.Backends); i++ {
-			select {
-			case ip := <-ipchan:
-				if ip == "" {
-					continue
-				}
-				liveBackends = append(liveBackends, ip)
-			case err := <-errchan:
-				return errors.Wrap(err, "err on channel")
-			}
+	}
+	r.mu.RUnlock()
+	max := 10
+	if len(checks) < max {
+		max = len(checks)
+	}
+	jobCh := make(chan *healthCheck, max)
+	resultCh := make(chan *healthCheck)
+	for i := 0; i < max; i++ {
+		go ping(jobCh, resultCh)
+	}
+	changed := false
+	for _, check := range checks {
+		if len(check.healthPath) > 0 {
+			changed = true
 		}
-		f.liveBackends = liveBackends
+		jobCh <- check
+	}
+	for i := 0; i < len(checks); i++ {
+		checks[i] = <-resultCh
+	}
+	close(jobCh)
+	for _, check := range checks {
+		if check.err == nil {
+			log.Printf("check health: %s 200 OK\n", check.ip)
+		} else {
+			log.Printf("check health: %s failed: %s\n", check.ip, check.err)
+		}
+		host := regClone[check.host]
+		host.liveBackends = append(host.liveBackends, check.ip)
 	}
 	if changed {
 		r.UpdateRegistry(regClone)
 	}
-	return nil
 }
 
+// UpdateRegistry for the reverse proxy with new frontends, backends, and
+// health checks.
 func (r *ReverseProxy) UpdateRegistry(reg Registry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reg = reg
 	r.rp.Transport = newTransport(reg)
+}
+
+func ping(jobCh, resultCh chan *healthCheck) {
+	for job := range jobCh {
+		target := "http://" + job.ip + job.healthPath
+		req, err := http.NewRequest("GET", target, nil)
+		if err != nil {
+			job.err = errors.Wrap(err, "new request")
+			resultCh <- job
+			return
+		}
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			job.err = errors.Wrap(err, "do")
+			resultCh <- job
+			return
+		}
+		if err = resp.Body.Close(); err != nil {
+			job.err = errors.Wrap(err, "close resp body")
+			resultCh <- job
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			job.err = fmt.Errorf("expected status code 200, got %d",
+				resp.StatusCode)
+			resultCh <- job
+			return
+		}
+		resultCh <- job
+	}
 }
 
 func newTransport(reg Registry) http.RoundTripper {
@@ -155,38 +222,4 @@ func newTransport(reg Registry) http.RoundTripper {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
 	}
-}
-
-func ping(
-	client *http.Client,
-	ip, target string,
-	semaphore chan int,
-	ipchan chan string,
-	errchan chan error,
-) {
-	defer func() {
-		semaphore <- 1
-	}()
-	req, err := http.NewRequest("GET", target, nil)
-	if err != nil {
-		errchan <- errors.Wrap(err, "new request")
-		return
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("%s: failed connection: %s", ip, err)
-		ipchan <- ""
-		return
-	}
-	if err = resp.Body.Close(); err != nil {
-		errchan <- errors.Wrap(err, "close resp body")
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("%s: expected status code 200, got %d",
-			ip, resp.StatusCode)
-		ipchan <- ""
-		return
-	}
-	ipchan <- ip
 }
