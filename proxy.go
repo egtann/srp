@@ -147,9 +147,10 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	}
 	go func() {
 		for _, check := range checks {
-			if !r.shutdown {
-				r.jobCh <- check
+			if r.shutdown {
+				return
 			}
+			r.jobCh <- check
 		}
 	}()
 	for i := 0; i < len(checks); i++ {
