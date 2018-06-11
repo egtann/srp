@@ -143,13 +143,13 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	}
 	close(jobCh)
 	for _, check := range checks {
-		if check.err == nil {
-			log.Printf("check health: %s 200 OK\n", check.ip)
-		} else {
+		if check.err != nil {
 			log.Printf("check health: %s failed: %s\n", check.ip, check.err)
+			continue
 		}
 		host := regClone[check.host]
 		host.liveBackends = append(host.liveBackends, check.ip)
+		log.Printf("check health: %s 200 OK\n", check.ip)
 	}
 	if changed {
 		r.UpdateRegistry(regClone)
@@ -172,25 +172,25 @@ func ping(jobCh, resultCh chan *healthCheck) {
 		if err != nil {
 			job.err = errors.Wrap(err, "new request")
 			resultCh <- job
-			return
+			continue
 		}
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
 			job.err = errors.Wrap(err, "do")
 			resultCh <- job
-			return
+			continue
 		}
 		if err = resp.Body.Close(); err != nil {
 			job.err = errors.Wrap(err, "close resp body")
 			resultCh <- job
-			return
+			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			job.err = fmt.Errorf("expected status code 200, got %d",
 				resp.StatusCode)
 			resultCh <- job
-			return
+			continue
 		}
 		resultCh <- job
 	}
