@@ -15,7 +15,10 @@ import (
 	"github.com/pkg/errors"
 )
 
-// ReverseProxy
+// ReverseProxy maps frontend hosts to backends. If HealthPath is set in the
+// config.json file, ReverseProxy checks the health of backend servers
+// periodically and automatically removes them from rotation until health
+// checks pass.
 type ReverseProxy struct {
 	rp       httputil.ReverseProxy
 	reg      Registry
@@ -23,6 +26,7 @@ type ReverseProxy struct {
 	resultCh chan *healthCheck
 	mu       sync.RWMutex
 	log      Logger
+	shutdown bool
 }
 
 // Registry maps hosts to backends with other helpful info, such as
@@ -143,7 +147,9 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	}
 	go func() {
 		for _, check := range checks {
-			r.jobCh <- check
+			if !r.shutdown {
+				r.jobCh <- check
+			}
 		}
 	}()
 	for i := 0; i < len(checks); i++ {
@@ -168,12 +174,10 @@ func (r *ReverseProxy) UpdateRegistry(reg Registry) {
 	r.rp.Transport = newTransport(reg)
 }
 
-// Shutdown stops future healthchecks and prevents goroutines from blocking.
+// Shutdown stops future healthchecks from running.
 func (r *ReverseProxy) Shutdown() {
+	r.shutdown = true
 	close(r.jobCh)
-	// Flush any existing results
-	for range r.resultCh {
-	}
 }
 
 func ping(job *healthCheck) error {
