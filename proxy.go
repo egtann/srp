@@ -105,8 +105,8 @@ func (r Registry) clone() Registry {
 // CheckHealth immediately exits, reporting that error.
 func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	checks := []*healthCheck{}
-	r.mu.RLock()
 	regClone := r.reg.clone()
+	r.mu.RLock()
 	for host, frontend := range regClone {
 		if frontend.HealthPath == "" {
 			frontend.liveBackends = frontend.Backends
