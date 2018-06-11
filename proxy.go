@@ -57,12 +57,14 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 	rp := httputil.ReverseProxy{Director: director, Transport: transport}
 	jobCh := make(chan *healthCheck)
 	resultCh := make(chan *healthCheck)
-	go func(jobCh <-chan *healthCheck, resultCh chan<- *healthCheck) {
-		for job := range jobCh {
-			job.err = ping(job)
-			resultCh <- job
-		}
-	}(jobCh, resultCh)
+	for i := 0; i < 10; i++ {
+		go func(jobCh <-chan *healthCheck, resultCh chan<- *healthCheck) {
+			for job := range jobCh {
+				job.err = ping(job)
+				resultCh <- job
+			}
+		}(jobCh, resultCh)
+	}
 	return &ReverseProxy{
 		rp:       rp,
 		log:      log,
@@ -139,10 +141,6 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	if len(checks) == 0 {
 		log.Printf("no health checks, skipping\n")
 		return
-	}
-	max := 1
-	if len(checks) < max {
-		max = len(checks)
 	}
 	go func() {
 		for _, check := range checks {
