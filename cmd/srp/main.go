@@ -80,10 +80,10 @@ func main() {
 			log.Fatal(err)
 		}
 	}()
-	proxy.CheckHealth(&http.Client{Timeout: timeout})
-	reload := make(chan bool)
-	go hotReloadConfig(*config, proxy, reload)
-	go checkHealth(proxy, reload)
+	proxy.CheckHealth()
+	sighupCh := make(chan bool)
+	go hotReloadConfig(*config, proxy, sighupCh)
+	go checkHealth(proxy, sighupCh)
 	gracefulRestart(srv, proxy, timeout)
 }
 
@@ -97,24 +97,27 @@ func (l *Logger) Printf(format string, vals ...interface{}) {
 // checkHealth of backend servers constantly. We cancel the current health
 // check when the reloaded channel receives a message, so a new health check
 // with the new registry can be started.
-func checkHealth(proxy *srp.ReverseProxy, reload <-chan bool) {
-	client := &http.Client{Timeout: timeout}
-	ticker := time.NewTicker(3 * time.Second)
+func checkHealth(proxy *srp.ReverseProxy, sighupCh <-chan bool) {
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			proxy.CheckHealth(client)
-		case <-reload:
+			proxy.CheckHealth()
+		case <-sighupCh:
 			return
 		}
 	}
 }
 
-// hotReloadConfig listens for a reload signal, then reloads the registry from
-// the config file. This recursively calls itself, so it can handle the signal
-// multiple times.
-func hotReloadConfig(filename string, proxy *srp.ReverseProxy, reload chan bool) {
+// hotReloadConfig listens for a reload signal (sighup), then reloads the
+// registry from the config file. This recursively calls itself, so it can
+// handle the signal multiple times.
+func hotReloadConfig(
+	filename string,
+	proxy *srp.ReverseProxy,
+	sighupCh chan bool,
+) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGHUP)
 	<-stop
@@ -125,9 +128,9 @@ func hotReloadConfig(filename string, proxy *srp.ReverseProxy, reload chan bool)
 	}
 	proxy.UpdateRegistry(reg)
 	log.Println("reloaded config")
-	reload <- true
-	go checkHealth(proxy, reload)
-	hotReloadConfig(filename, proxy, reload)
+	sighupCh <- true
+	go checkHealth(proxy, sighupCh)
+	hotReloadConfig(filename, proxy, sighupCh)
 }
 
 // gracefulRestart listens for an interupt or terminate signal. When either is
