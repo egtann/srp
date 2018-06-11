@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,13 +26,33 @@ func main() {
 	portTmp := flag.String("p", "3000", "port")
 	config := flag.String("c", "config.json", "config file")
 	sslURL := flag.String("url", "", "enable ssl on the proxy's url (optional)")
+	flag.Usage = func() {
+		usage([]string{})
+	}
 	flag.Parse()
-
-	rand.Seed(time.Now().UnixNano())
+	issues := []string{}
+	port := strings.TrimLeft(*portTmp, ":")
+	portInt, err := strconv.Atoi(port)
+	if err != nil {
+		issues = append(issues, "port must be an integer")
+	}
+	if portInt < 0 {
+		issues = append(issues, "port cannot be negative")
+	}
+	if len(*sslURL) > 0 {
+		if _, err = url.ParseRequestURI(*sslURL); err != nil {
+			issues = append(issues, "invalid url")
+		}
+	}
 	reg, err := srp.NewRegistry(*config)
 	if err != nil {
-		log.Fatal(err)
+		issues = append(issues, err.Error())
 	}
+	if len(issues) > 0 {
+		usage(issues)
+		os.Exit(1)
+	}
+	rand.Seed(time.Now().UnixNano())
 	proxy := srp.NewProxy(&Logger{}, reg)
 
 	srv := &http.Server{
@@ -38,7 +61,6 @@ func main() {
 		WriteTimeout:   timeout,
 		MaxHeaderBytes: 1 << 20,
 	}
-	var port string
 	if len(*sslURL) > 0 {
 		hosts := append(reg.Hosts(), *sslURL)
 		m := &autocert.Manager{
@@ -50,7 +72,6 @@ func main() {
 		srv.Addr = ":https"
 		port = "443"
 	} else {
-		port = strings.TrimLeft(*portTmp, ":")
 		srv.Addr = ":" + port
 	}
 	go func() {
@@ -125,4 +146,54 @@ func gracefulRestart(srv *http.Server, timeout time.Duration) {
 		os.Exit(1)
 	}
 	log.Println("shut down")
+}
+
+func usage(issues []string) {
+	fmt.Print(`usage:
+
+    srp [options...]
+
+global options:
+
+    [-p]    port, default "3000"
+    [-c]    config file, default "config.json"
+    [-url]  url of the reverse proxy for https
+
+config file:
+
+    The config file contains JSON that maps your frontend hosts to backends. It
+    needs to be defined. For example:
+
+    {
+        "127.0.0.1:3000": {
+	    "HealthPath": "/health",
+	    "Backends": [
+                "127.0.0.1:3001",
+                "127.0.0.1:3002"
+	    ]
+	}
+    }
+
+    Available options for each frontend are: HealthPath, Backends.
+
+    If HealthPath is provided, SRP will check the health of the backend servers
+    every few seconds and remove any from rotation until they come back online.
+
+notes:
+
+    * The url flag is optional. If provided, srp will use https. If not
+      provided (such as when testing on 127.0.0.1), srp will use http.
+
+    * After terminating TLS, SRP communicates over HTTP (plaintext) to the
+      backend servers. Some cloud providers automatically encrypt traffic over
+      their internal IP network (including Google Cloud). Check to ensure that
+      your cloud provider does this before using SRP in production.
+
+`)
+	if len(issues) > 0 {
+		fmt.Printf("errors:\n\n")
+		for _, issue := range issues {
+			fmt.Println("    " + issue)
+		}
+	}
 }

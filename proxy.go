@@ -68,7 +68,7 @@ func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func NewRegistry(filename string) (Registry, error) {
 	byt, err := ioutil.ReadFile(filename)
 	if err != nil {
-		return nil, errors.Wrapf(err, "read file %q", filename)
+		return nil, errors.Wrapf(err, "read config file %q", filename)
 	}
 	reg := Registry{}
 	err = json.Unmarshal(byt, &reg)
