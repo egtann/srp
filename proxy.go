@@ -17,10 +17,12 @@ import (
 
 // ReverseProxy
 type ReverseProxy struct {
-	rp  httputil.ReverseProxy
-	reg Registry
-	mu  sync.RWMutex
-	log Logger
+	rp       httputil.ReverseProxy
+	reg      Registry
+	jobCh    chan *healthCheck
+	resultCh chan *healthCheck
+	mu       sync.RWMutex
+	log      Logger
 }
 
 // Registry maps hosts to backends with other helpful info, such as
@@ -53,7 +55,21 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 	}
 	transport := newTransport(reg)
 	rp := httputil.ReverseProxy{Director: director, Transport: transport}
-	return &ReverseProxy{rp: rp, log: log, reg: reg}
+	jobCh := make(chan *healthCheck)
+	resultCh := make(chan *healthCheck)
+	go func(jobCh <-chan *healthCheck, resultCh chan<- *healthCheck) {
+		for job := range jobCh {
+			job.err = ping(job)
+			resultCh <- job
+		}
+	}(jobCh, resultCh)
+	return &ReverseProxy{
+		rp:       rp,
+		log:      log,
+		reg:      reg,
+		jobCh:    jobCh,
+		resultCh: resultCh,
+	}
 }
 
 // ServeHTTP implements the http.RoundTripper interface.
@@ -121,22 +137,21 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 		}
 	}
 	if len(checks) == 0 {
+		log.Printf("no health checks, skipping\n")
 		return
 	}
-	max := 10
+	max := 1
 	if len(checks) < max {
 		max = len(checks)
 	}
-	jobCh := make(chan *healthCheck, max)
-	resultCh := make(chan *healthCheck)
-	for i := 0; i < max; i++ {
-		go ping(jobCh, resultCh)
-	}
-	for _, check := range checks {
-		jobCh <- check
-	}
+	go func() {
+		for _, check := range checks {
+			r.jobCh <- check
+		}
+	}()
+	log.Printf("got checks\n")
 	for i := 0; i < len(checks); i++ {
-		check := <-resultCh
+		check := <-r.resultCh
 		if check.err != nil {
 			log.Printf("check health: %s failed: %s\n", check.ip, check.err)
 			continue
@@ -145,7 +160,7 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 		host.liveBackends = append(host.liveBackends, check.ip)
 		log.Printf("check health: %s 200 OK\n", check.ip)
 	}
-	close(jobCh)
+	log.Printf("got results\n")
 	r.UpdateRegistry(regClone)
 }
 
@@ -158,35 +173,33 @@ func (r *ReverseProxy) UpdateRegistry(reg Registry) {
 	r.rp.Transport = newTransport(reg)
 }
 
-func ping(jobCh, resultCh chan *healthCheck) {
-	for job := range jobCh {
-		target := "http://" + job.ip + job.healthPath
-		req, err := http.NewRequest("GET", target, nil)
-		if err != nil {
-			job.err = errors.Wrap(err, "new request")
-			resultCh <- job
-			continue
-		}
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			job.err = errors.Wrap(err, "do")
-			resultCh <- job
-			continue
-		}
-		if err = resp.Body.Close(); err != nil {
-			job.err = errors.Wrap(err, "close resp body")
-			resultCh <- job
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			job.err = fmt.Errorf("expected status code 200, got %d",
-				resp.StatusCode)
-			resultCh <- job
-			continue
-		}
-		resultCh <- job
+// Halt future healthchecks.
+func (r *ReverseProxy) Halt() {
+	close(r.jobCh)
+	// Flush any existing results
+	for range r.resultCh {
 	}
+}
+
+func ping(job *healthCheck) error {
+	target := "http://" + job.ip + job.healthPath
+	req, err := http.NewRequest("GET", target, nil)
+	if err != nil {
+		return errors.Wrap(err, "new request")
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "do")
+	}
+	if err = resp.Body.Close(); err != nil {
+		return errors.Wrap(err, "close resp body")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("expected status code 200, got %d",
+			resp.StatusCode)
+	}
+	return nil
 }
 
 func newTransport(reg Registry) http.RoundTripper {
