@@ -87,11 +87,13 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) error {
 	for k, v := range r.reg {
 		regClone[k] = v
 	}
+	changed := false
 	semaphore := make(chan int, 10)
 	for host, frontend := range regClone {
 		if len(frontend.HealthPath) == 0 {
 			continue
 		}
+		changed = true
 		liveBackends := []string{}
 		ipchan := make(chan string)
 		errchan := make(chan error, 1)
@@ -114,13 +116,17 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) error {
 		}
 		f.liveBackends = liveBackends
 	}
+	if changed {
+		r.UpdateRegistry(regClone)
+	}
+	return nil
+}
 
-	// Update the registry
+func (r *ReverseProxy) UpdateRegistry(reg Registry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.reg = regClone
-	r.rp.Transport = newTransport(regClone)
-	return nil
+	r.reg = reg
+	r.rp.Transport = newTransport(reg)
 }
 
 func newTransport(reg Registry) http.RoundTripper {
