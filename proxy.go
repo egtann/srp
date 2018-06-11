@@ -139,7 +139,6 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 		}
 	}
 	if len(checks) == 0 {
-		log.Printf("no health checks, skipping\n")
 		return
 	}
 	go func() {
@@ -147,7 +146,6 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 			r.jobCh <- check
 		}
 	}()
-	log.Printf("got checks\n")
 	for i := 0; i < len(checks); i++ {
 		check := <-r.resultCh
 		if check.err != nil {
@@ -158,7 +156,6 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 		host.liveBackends = append(host.liveBackends, check.ip)
 		log.Printf("check health: %s 200 OK\n", check.ip)
 	}
-	log.Printf("got results\n")
 	r.UpdateRegistry(regClone)
 }
 
@@ -171,8 +168,8 @@ func (r *ReverseProxy) UpdateRegistry(reg Registry) {
 	r.rp.Transport = newTransport(reg)
 }
 
-// Halt future healthchecks.
-func (r *ReverseProxy) Halt() {
+// Shutdown stops future healthchecks and prevents goroutines from blocking.
+func (r *ReverseProxy) Shutdown() {
 	close(r.jobCh)
 	// Flush any existing results
 	for range r.resultCh {
