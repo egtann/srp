@@ -122,9 +122,8 @@ func (r Registry) clone() Registry {
 	return clone
 }
 
-// CheckHealth of backend servers in the registry concurrently, up to 10 at a
-// time. If an unexpected error is returned during any of the checks,
-// CheckHealth immediately exits, reporting that error.
+// CheckHealth of backend servers in the registry concurrently, and update the
+// registry so requests are only routed to healthy servers.
 func (r *ReverseProxy) CheckHealth(client *http.Client) {
 	checks := []*healthCheck{}
 	regClone := r.reg.clone()
