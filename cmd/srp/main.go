@@ -80,7 +80,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}()
-	proxy.CheckHealth(&http.Client{Timeout: timeout})
+	proxy.CheckHealth()
 	reload := make(chan bool)
 	go hotReloadConfig(*config, proxy, reload)
 	go checkHealth(proxy, reload)
@@ -98,13 +98,12 @@ func (l *Logger) Printf(format string, vals ...interface{}) {
 // check when the reloaded channel receives a message, so a new health check
 // with the new registry can be started.
 func checkHealth(proxy *srp.ReverseProxy, reload <-chan bool) {
-	client := &http.Client{Timeout: timeout}
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			proxy.CheckHealth(client)
+			proxy.CheckHealth()
 		case <-reload:
 			return
 		}

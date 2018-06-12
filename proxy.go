@@ -1,6 +1,8 @@
 package srp
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -20,17 +22,19 @@ import (
 // periodically and automatically removes them from rotation until health
 // checks pass.
 type ReverseProxy struct {
-	rp       httputil.ReverseProxy
-	reg      Registry
+	log      Logger
 	jobCh    chan *healthCheck
 	resultCh chan *healthCheck
+	regCh    chan map[string]*backend
+	reg      Registry
 	mu       sync.RWMutex
-	log      Logger
 }
 
 // Registry maps hosts to backends with other helpful info, such as
 // healthchecks.
-type Registry map[string]*struct {
+type Registry map[string]*backend
+
+type backend struct {
 	HealthPath   string
 	Backends     []string
 	liveBackends []string
@@ -51,13 +55,6 @@ type healthCheck struct {
 
 // NewProxy from a given Registry.
 func NewProxy(log Logger, reg Registry) *ReverseProxy {
-	director := func(req *http.Request) {
-		req.URL.Scheme = "http"
-		req.URL.Host = req.Host
-		log.Printf("%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
-	}
-	transport := newTransport(reg)
-	rp := httputil.ReverseProxy{Director: director, Transport: transport}
 	jobCh := make(chan *healthCheck)
 	resultCh := make(chan *healthCheck)
 	for i := 0; i < 10; i++ {
@@ -68,20 +65,28 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 			}
 		}(jobCh, resultCh)
 	}
-	return &ReverseProxy{
-		rp:       rp,
-		log:      log,
+	regCh := make(chan map[string]*backend)
+	r := &ReverseProxy{
 		reg:      reg,
+		log:      log,
 		jobCh:    jobCh,
 		resultCh: resultCh,
+		regCh:    regCh,
 	}
+	r.UpdateRegistry(reg)
+	return r
 }
 
 // ServeHTTP implements the http.RoundTripper interface.
 func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	r.rp.ServeHTTP(w, req)
+	director := func(req *http.Request) {
+		req.URL.Scheme = "http"
+		req.URL.Host = req.Host
+		log.Printf("%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
+	}
+	tp := newTransport(r.regCh)
+	rp := httputil.ReverseProxy{Director: director, Transport: tp}
+	rp.ServeHTTP(w, req)
 }
 
 // NewRegistry for a given configuration file. This reports an error if any
@@ -113,25 +118,34 @@ func (r Registry) Hosts() []string {
 	return hosts
 }
 
-func (r Registry) clone() Registry {
+func (r *ReverseProxy) cloneRegistry() Registry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var byt bytes.Buffer
+	enc := gob.NewEncoder(&byt)
+	if err := enc.Encode(r.reg); err != nil {
+		panic(err)
+	}
 	clone := Registry{}
-	for k, v := range r {
-		clone[k] = v
+	dec := gob.NewDecoder(&byt)
+	if err := dec.Decode(&clone); err != nil {
+		panic(err)
 	}
 	return clone
 }
 
 // CheckHealth of backend servers in the registry concurrently, and update the
 // registry so requests are only routed to healthy servers.
-func (r *ReverseProxy) CheckHealth(client *http.Client) {
+func (r *ReverseProxy) CheckHealth() {
+	log.Printf("checking health\n")
 	checks := []*healthCheck{}
-	regClone := r.reg.clone()
+	regClone := r.cloneRegistry()
+	log.Printf("got reg clone\n")
 	for host, frontend := range regClone {
 		if frontend.HealthPath == "" {
-			frontend.liveBackends = frontend.Backends
+			regClone[host].liveBackends = frontend.Backends
 			continue
 		}
-		frontend.liveBackends = []string{}
 		for _, ip := range frontend.Backends {
 			checks = append(checks, &healthCheck{
 				host:       host,
@@ -158,16 +172,17 @@ func (r *ReverseProxy) CheckHealth(client *http.Client) {
 		host.liveBackends = append(host.liveBackends, check.ip)
 		log.Printf("check health: %s 200 OK\n", check.ip)
 	}
-	r.UpdateRegistry(regClone)
+	go func() {
+		for {
+			r.regCh <- regClone
+		}
+	}()
 }
 
-// UpdateRegistry for the reverse proxy with new frontends, backends, and
-// health checks.
 func (r *ReverseProxy) UpdateRegistry(reg Registry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reg = reg
-	r.rp.Transport = newTransport(reg)
 }
 
 func ping(job *healthCheck) error {
@@ -191,11 +206,18 @@ func ping(job *healthCheck) error {
 	return nil
 }
 
-func newTransport(reg Registry) http.RoundTripper {
+func newTransport(regCh chan map[string]*backend) *http.Transport {
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		Dial: func(network, addr string) (net.Conn, error) {
-			endpoints := reg[addr].liveBackends
+			log.Printf("dialing addr %s\n", addr)
+			reg := <-regCh
+			frontend, ok := reg[addr]
+			if !ok {
+				return nil, fmt.Errorf("no frontend for %s", addr)
+			}
+			endpoints := frontend.Backends
+			log.Println("got endpoints\n")
 			if len(endpoints) == 0 {
 				return nil, fmt.Errorf("no live backend for %s", addr)
 			}
