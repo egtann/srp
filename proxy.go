@@ -25,6 +25,7 @@ type ReverseProxy struct {
 	log      Logger
 	jobCh    chan *healthCheck
 	resultCh chan *healthCheck
+	reqCh    chan struct{}
 	regCh    chan map[string]*backend
 	reg      Registry
 	mu       sync.RWMutex
@@ -66,14 +67,15 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 		}(jobCh, resultCh)
 	}
 	regCh := make(chan map[string]*backend)
+	reqCh := make(chan struct{})
 	r := &ReverseProxy{
 		reg:      reg,
 		log:      log,
 		jobCh:    jobCh,
 		resultCh: resultCh,
+		reqCh:    reqCh,
 		regCh:    regCh,
 	}
-	r.UpdateRegistry(reg)
 	return r
 }
 
@@ -84,7 +86,7 @@ func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		req.URL.Host = req.Host
 		log.Printf("%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
 	}
-	tp := newTransport(r.regCh)
+	tp := newTransport(r.reqCh, r.regCh)
 	rp := httputil.ReverseProxy{Director: director, Transport: tp}
 	rp.ServeHTTP(w, req)
 }
@@ -137,10 +139,8 @@ func (r *ReverseProxy) cloneRegistry() Registry {
 // CheckHealth of backend servers in the registry concurrently, and update the
 // registry so requests are only routed to healthy servers.
 func (r *ReverseProxy) CheckHealth() {
-	log.Printf("checking health\n")
 	checks := []*healthCheck{}
 	regClone := r.cloneRegistry()
-	log.Printf("got reg clone\n")
 	for host, frontend := range regClone {
 		if frontend.HealthPath == "" {
 			regClone[host].liveBackends = frontend.Backends
@@ -173,7 +173,7 @@ func (r *ReverseProxy) CheckHealth() {
 		log.Printf("check health: %s 200 OK\n", check.ip)
 	}
 	go func() {
-		for {
+		for range r.reqCh {
 			r.regCh <- regClone
 		}
 	}()
@@ -206,18 +206,20 @@ func ping(job *healthCheck) error {
 	return nil
 }
 
-func newTransport(regCh chan map[string]*backend) *http.Transport {
+func newTransport(
+	reqCh chan struct{},
+	regCh chan map[string]*backend,
+) *http.Transport {
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		Dial: func(network, addr string) (net.Conn, error) {
-			log.Printf("dialing addr %s\n", addr)
+			reqCh <- struct{}{}
 			reg := <-regCh
 			frontend, ok := reg[addr]
 			if !ok {
 				return nil, fmt.Errorf("no frontend for %s", addr)
 			}
 			endpoints := frontend.Backends
-			log.Println("got endpoints\n")
 			if len(endpoints) == 0 {
 				return nil, fmt.Errorf("no live backend for %s", addr)
 			}
