@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/egtann/srp"
+	"github.com/pkg/errors"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -39,8 +40,10 @@ func main() {
 	if portInt < 0 {
 		issues = append(issues, "port cannot be negative")
 	}
+	var selfURL *url.URL
 	if len(*sslURL) > 0 {
-		if _, err = url.ParseRequestURI(*sslURL); err != nil {
+		selfURL, err = url.ParseRequestURI(*sslURL)
+		if err != nil {
 			issues = append(issues, "invalid url")
 		}
 	}
@@ -62,13 +65,18 @@ func main() {
 		MaxHeaderBytes: 1 << 20,
 	}
 	if len(*sslURL) > 0 {
-		hosts := append(reg.Hosts(), *sslURL)
+		hosts := append(reg.Hosts(), selfURL.Host)
 		m := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(hosts...),
 		}
 		srv.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate}
-		go http.ListenAndServe(":http", m.HTTPHandler(nil))
+		go func() {
+			err = http.ListenAndServe(":http", m.HTTPHandler(nil))
+			if err != nil {
+				log.Fatal(errors.Wrap(err, "autocert"))
+			}
+		}()
 		srv.Addr = ":https"
 		port = "443"
 	} else {
