@@ -80,7 +80,9 @@ func main() {
 			log.Fatal(err)
 		}
 	}()
-	proxy.CheckHealth()
+	if err = proxy.CheckHealth(); err != nil {
+		log.Println("check health", err)
+	}
 	sighupCh := make(chan bool)
 	go hotReloadConfig(*config, proxy, sighupCh)
 	go checkHealth(proxy, sighupCh)
@@ -98,12 +100,15 @@ func (l *Logger) Printf(format string, vals ...interface{}) {
 // check when the reloaded channel receives a message, so a new health check
 // with the new registry can be started.
 func checkHealth(proxy *srp.ReverseProxy, sighupCh <-chan bool) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			proxy.CheckHealth()
+			err := proxy.CheckHealth()
+			if err != nil {
+				log.Println("check health", err)
+			}
 		case <-sighupCh:
 			return
 		}
