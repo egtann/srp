@@ -32,7 +32,9 @@ type ReverseProxy struct {
 
 // Registry maps hosts to backends with other helpful info, such as
 // healthchecks.
-type Registry map[string]*struct {
+type Registry map[string]*backend
+
+type backend struct {
 	HealthPath   string
 	Backends     []string
 	liveBackends []string
@@ -116,30 +118,28 @@ func (r Registry) Hosts() []string {
 	return hosts
 }
 
-func (r *ReverseProxy) cloneRegistry() (Registry, error) {
+func (r *ReverseProxy) cloneRegistry() Registry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var byt bytes.Buffer
-	enc := gob.NewEncoder(&byt)
-	if err := enc.Encode(r.reg); err != nil {
-		return nil, errors.Wrap(err, "encode")
+	clone := make(Registry, len(r.reg))
+	for host, fe := range r.reg {
+		cfe := &backend{
+			HealthPath: fe.HealthPath,
+			Backends:   make([]string, len(fe.Backends)),
+		}
+		for i, be := range fe.Backends {
+			cfe.Backends[i] = be
+		}
+		clone[host] = cfe
 	}
-	dec := gob.NewDecoder(&byt)
-	clone := Registry{}
-	if err := dec.Decode(&clone); err != nil {
-		return nil, errors.Wrap(err, "decode")
-	}
-	return clone, nil
+	return clone
 }
 
 // CheckHealth of backend servers in the registry concurrently, and update the
 // registry so requests are only routed to healthy servers.
 func (r *ReverseProxy) CheckHealth() error {
 	checks := []*healthCheck{}
-	regClone, err := r.cloneRegistry()
-	if err != nil {
-		return errors.Wrap(err, "clone registry")
-	}
+	regClone := r.cloneRegistry()
 	for host, frontend := range regClone {
 		if frontend.HealthPath == "" {
 			frontend.liveBackends = frontend.Backends
