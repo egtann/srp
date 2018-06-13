@@ -67,27 +67,41 @@ func main() {
 	if len(*sslURL) > 0 {
 		hosts := append(reg.Hosts(), selfURL.Host)
 		m := &autocert.Manager{
+			Cache:      autocert.DirCache("certs"),
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(hosts...),
 		}
-		srv.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate}
+		getCert := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			log.Printf("get cert for %s\n", hello.ServerName)
+			cert, err := m.GetCertificate(hello)
+			if err != nil {
+				log.Println("failed to get cert:", err)
+			}
+			return cert, err
+		}
+		srv.TLSConfig = &tls.Config{GetCertificate: getCert}
 		go func() {
 			err = http.ListenAndServe(":http", m.HTTPHandler(nil))
 			if err != nil {
 				log.Fatal(errors.Wrap(err, "autocert"))
 			}
 		}()
-		srv.Addr = ":https"
 		port = "443"
+		srv.Addr = ":https"
+		go func() {
+			if err = srv.ListenAndServeTLS("", ""); err != nil {
+				log.Fatal(err)
+			}
+		}()
 	} else {
 		srv.Addr = ":" + port
+		go func() {
+			if err = srv.ListenAndServe(); err != nil {
+				log.Fatal(err)
+			}
+		}()
 	}
-	go func() {
-		log.Println("listening on", port)
-		if err = srv.ListenAndServe(); err != nil {
-			log.Fatal(err)
-		}
-	}()
+	log.Println("listening on", port)
 	if err = proxy.CheckHealth(); err != nil {
 		log.Println("check health", err)
 	}

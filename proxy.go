@@ -208,7 +208,12 @@ func newTransport(reg Registry) http.RoundTripper {
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		Dial: func(network, addr string) (net.Conn, error) {
-			host, ok := reg[addr]
+			// Trim training ":80"
+			if len(addr) <= 3 {
+				return nil, fmt.Errorf("invalid address %q", addr)
+			}
+			addrShort := addr[:len(addr)-3]
+			host, ok := reg[addrShort]
 			if !ok {
 				return nil, fmt.Errorf("no host for %s", addr)
 			}
@@ -218,16 +223,18 @@ func newTransport(reg Registry) http.RoundTripper {
 			}
 			randInt := rand.Int()
 			endpoint := endpoints[randInt%len(endpoints)]
-			conn, err := net.Dial(network, endpoint)
+			conn, err := net.Dial(network, endpoint+":80")
 			if len(endpoints) < 2 || err == nil {
 				return conn, err
 			}
 			// Retry on other endpoints if there are multiple
-			conn, err = net.Dial(network, endpoints[(randInt+1)%len(endpoints)])
+			endpoint = endpoints[(randInt+1)%len(endpoints)]
+			conn, err = net.Dial(network, endpoint+":80")
 			if len(endpoints) < 3 || err == nil {
 				return conn, err
 			}
-			return net.Dial(network, endpoints[(randInt+2)%len(endpoints)])
+			endpoint = endpoints[(randInt+2)%len(endpoints)]
+			return net.Dial(network, endpoint+":80")
 		},
 		MaxIdleConns:          100,
 		IdleConnTimeout:       30 * time.Second,
