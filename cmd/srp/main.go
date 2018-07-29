@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/egtann/srp"
-	"github.com/pkg/errors"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -83,7 +82,7 @@ func main() {
 		go func() {
 			err = http.ListenAndServe(":http", m.HTTPHandler(nil))
 			if err != nil {
-				log.Fatal(errors.Wrap(err, "autocert"))
+				log.Fatal(fmt.Printf("listen and serve: %s", err))
 			}
 		}()
 		port = "443"

@@ -11,8 +11,6 @@ import (
 	"net/http/httputil"
 	"sync"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 // ReverseProxy maps frontend hosts to backends. If HealthPath is set in the
@@ -92,12 +90,12 @@ func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func NewRegistry(filename string) (Registry, error) {
 	byt, err := ioutil.ReadFile(filename)
 	if err != nil {
-		return nil, errors.Wrapf(err, "read config file %q", filename)
+		return nil, fmt.Errorf("read config file %q: %s", filename, err)
 	}
 	reg := Registry{}
 	err = json.Unmarshal(byt, &reg)
 	if err != nil {
-		return nil, errors.Wrap(err, "unmarshal config")
+		return nil, fmt.Errorf("unmarshal config: %s", err)
 	}
 	for host, v := range reg {
 		if len(v.Backends) == 0 {
@@ -187,15 +185,15 @@ func ping(job *healthCheck) error {
 	target := "http://" + job.ip + job.healthPath
 	req, err := http.NewRequest("GET", target, nil)
 	if err != nil {
-		return errors.Wrap(err, "new request")
+		return fmt.Errorf("new request: %s", err)
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return errors.Wrap(err, "do")
+		return fmt.Errorf("do: %s", err)
 	}
 	if err = resp.Body.Close(); err != nil {
-		return errors.Wrap(err, "close resp body")
+		return fmt.Errorf("close resp body: %s", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("expected status code 200, got %d",
