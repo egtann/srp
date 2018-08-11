@@ -88,6 +88,7 @@ func main() {
 		port = "443"
 		srv.Addr = ":https"
 		go func() {
+			log.Println("serving tls")
 			if err = srv.ListenAndServeTLS("", ""); err != nil {
 				log.Fatal(err)
 			}
