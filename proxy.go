@@ -58,7 +58,16 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 		log.Printf("%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
 	}
 	transport := newTransport(reg)
-	rp := httputil.ReverseProxy{Director: director, Transport: transport}
+	errorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
+		w.WriteHeader(http.StatusBadGateway)
+		msg := fmt.Sprintf("http: proxy error: %s %s: %v", r.Method, r.URL, err)
+		w.Write([]byte(msg))
+	}
+	rp := httputil.ReverseProxy{
+		Director:     director,
+		Transport:    transport,
+		ErrorHandler: errorHandler,
+	}
 	jobCh := make(chan *healthCheck)
 	resultCh := make(chan *healthCheck)
 	for i := 0; i < 10; i++ {
