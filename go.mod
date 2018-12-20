@@ -1,3 +1,3 @@
 module github.com/egtann/srp
 
-require golang.org/x/crypto v0.0.0-20180723164146-c126467f60eb
+require golang.org/x/crypto v0.0.0-20181203042331-505ab145d0a9
