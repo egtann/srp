@@ -132,9 +132,7 @@ func (r *ReverseProxy) cloneRegistry() Registry {
 			HealthPath: fe.HealthPath,
 			Backends:   make([]string, len(fe.Backends)),
 		}
-		for i, be := range fe.Backends {
-			cfe.Backends[i] = be
-		}
+		copy(cfe.Backends, fe.Backends)
 		clone[host] = cfe
 	}
 	return clone
