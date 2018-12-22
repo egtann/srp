@@ -18,12 +18,14 @@ import (
 // periodically and automatically removes them from rotation until health
 // checks pass.
 type ReverseProxy struct {
-	rp       httputil.ReverseProxy
-	reg      Registry
-	jobCh    chan *healthCheck
-	resultCh chan *healthCheck
-	mu       sync.RWMutex
-	log      Logger
+	rp                httputil.ReverseProxy
+	reg               Registry
+	jobCh             chan *healthCheck
+	resultCh          chan *healthCheck
+	mu                sync.RWMutex
+	log               Logger
+	directors         []func(*http.Request)
+	responseModifiers []func(*http.Response) error
 }
 
 // Registry maps hosts to backends with other helpful info, such as
@@ -51,12 +53,6 @@ type healthCheck struct {
 
 // NewProxy from a given Registry.
 func NewProxy(log Logger, reg Registry) *ReverseProxy {
-	director := func(req *http.Request) {
-		req.URL.Scheme = "http"
-		req.URL.Host = req.Host
-		req.Header.Set("X-Real-IP", req.RemoteAddr)
-		log.Printf("%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
-	}
 	transport := newTransport(reg)
 	errorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -64,7 +60,7 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 		w.Write([]byte(msg))
 	}
 	rp := httputil.ReverseProxy{
-		Director:     director,
+		Director:     func(req *http.Request) {},
 		Transport:    transport,
 		ErrorHandler: errorHandler,
 	}
@@ -85,6 +81,18 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 		jobCh:    jobCh,
 		resultCh: resultCh,
 	}
+}
+
+func (r *ReverseProxy) WithDirector(fn func(*http.Request)) *ReverseProxy {
+	r.directors = append(r.directors, fn)
+	return r
+}
+
+func (r *ReverseProxy) WithResponseModifier(
+	fn func(*http.Response) error,
+) *ReverseProxy {
+	r.responseModifiers = append(r.responseModifiers, fn)
+	return r
 }
 
 // ServeHTTP implements the http.RoundTripper interface.
@@ -245,5 +253,18 @@ func newTransport(reg Registry) http.RoundTripper {
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
+	}
+}
+
+func RedirectHTTP(req *http.Request) {
+	req.URL.Scheme = "http"
+	req.URL.Host = req.Host
+	req.Header.Set("X-Real-IP", req.RemoteAddr)
+}
+
+func LogRequest(log Logger) func(req *http.Request) {
+	return func(req *http.Request) {
+		log.Printf("%s requested %s %s", req.RemoteAddr, req.Method,
+			req.Host)
 	}
 }
