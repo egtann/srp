@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -16,18 +15,20 @@ import (
 )
 
 type Banner struct {
-	// lims maps ip addresss to rate limiters. The map is pruned
+	// counts maps ip addreses to error counts. The map is pruned
 	// periodically to limit memory usage.
-	lims   map[string]*accessor
-	limsMu sync.RWMutex
+	counts   map[string]*counter
+	countsMu sync.RWMutex
 
-	// bannedIPs records IPs that shouldn't be allowed access.
-	bannedIPs   map[string]struct{}
-	bannedIPsMu sync.RWMutex
+	// blacklist records IPs that shouldn't be allowed access.
+	blacklist   map[string]struct{}
+	blacklistMu sync.RWMutex
 
-	// maxRPS describes the maximum failed requests per second before
-	// triggering a ban.
-	maxRPS float64
+	// white
+	whitelist map[string]struct{}
+
+	banThreshold int
+	duration     time.Duration
 
 	// writer keeps an optional persistant record of bans by writing to
 	// disk or logs.
@@ -35,13 +36,13 @@ type Banner struct {
 	writerMu sync.Mutex
 }
 
-type accessor struct {
-	limiter  *rate.Limiter
-	lastUsed time.Time
+type counter struct {
+	val       int
+	createdAt time.Time
 }
 
-// Record responses with error status codes and the header X-Banner-Cost. It
-// strips X-Banner-Cost from the header.
+// Record responses with error status codes and the header X-Banner. Record
+// strips X-Banner from the header.
 //
 // This records failed accesses from each IP, and if any pass a threshold,
 // they're banned for 10 minutes.
@@ -51,39 +52,25 @@ func (b *Banner) Record(log srp.Logger) func(*http.Response) error {
 			return nil
 		}
 
-		// Determine cost of infraction. This enables quicker bans for
-		// sensitive errors like incorrect API keys, bad logins, and
-		// 404s when scanning for vulnerabilities.
-		cost := 1
-		costHeader := resp.Header.Get("X-Banner-Cost")
-		if costHeader != "" {
-			var err error
-			cost, err = strconv.Atoi(costHeader)
-			if err != nil {
-				return fmt.Errorf("parse cost: %s", err)
-			}
-		}
-		resp.Header.Del("X-Banner-Cost")
-
-		b.limsMu.RLock()
-		acc, ok := b.lims[resp.Request.RemoteAddr]
-		b.limsMu.RUnlock()
+		b.countsMu.RLock()
+		cnt, ok := b.counts[resp.Request.RemoteAddr]
+		b.countsMu.RUnlock()
 		now := time.Now()
 		if ok {
 			log.Printf("record: existing ip %s\n", resp.Request.RemoteAddr)
-			acc.lastUsed = now
+			cnt.val++
 		} else {
 			log.Printf("record: new ip %s\n", resp.Request.RemoteAddr)
 			lim := rate.NewLimiter(rate.Limit(b.maxRPS), 3)
-			acc = &accessor{
-				limiter:  lim,
-				lastUsed: now,
+			cnt = &counter{
+				val:       1,
+				createdAt: now,
 			}
-			b.limsMu.Lock()
-			b.lims[resp.Request.RemoteAddr] = acc
-			b.limsMu.Unlock()
+			b.countsMu.Lock()
+			b.counts[resp.Request.RemoteAddr] = cnt
+			b.countsMu.Unlock()
 		}
-		if ok := acc.limiter.AllowN(now, cost); !ok {
+		if ok := cnt.limiter.AllowN(now, cost); !ok {
 			if err := b.ban(resp.Request.RemoteAddr); err != nil {
 				return fmt.Errorf("write ban: %s", err)
 			}
@@ -95,31 +82,30 @@ func (b *Banner) Record(log srp.Logger) func(*http.Response) error {
 // Monitor inbound requests and cancel any from banned IPs.
 func (b *Banner) Monitor(log srp.Logger) func(*http.Request) {
 	return func(req *http.Request) {
-		b.bannedIPsMu.RLock()
-		defer b.bannedIPsMu.RUnlock()
-		if _, exist := b.bannedIPs[req.RemoteAddr]; exist {
-			// This is a banned IP, so cancel the request
-			// immediately.
-			//
-			// TODO is there a better option that doesn't require a
-			// custom ReverseProxy implementation or modifying the
-			// apps themselves?
-			log.Printf("monitor: bad ip %s\n", req.RemoteAddr)
-			ctx, cancel := context.WithCancel(req.Context())
-			req = req.WithContext(ctx)
-			cancel()
+		b.blacklistMu.RLock()
+		defer b.blacklistMu.RUnlock()
+		if _, exist := b.blacklist[req.RemoteAddr]; !exist {
+			// Good IP
+			log.Printf("monitor: good ip %s\n", req.RemoteAddr)
 			return
 		}
 
-		// Good IP
-		log.Printf("monitor: good ip %s\n", req.RemoteAddr)
+		// This is a banned IP, so cancel the request immediately.
+		//
+		// TODO is there a better option that doesn't require a custom
+		// ReverseProxy implementation or modifying the apps
+		// themselves?
+		log.Printf("monitor: bad ip %s\n", req.RemoteAddr)
+		ctx, cancel := context.WithCancel(req.Context())
+		req = req.WithContext(ctx)
+		cancel()
 	}
 }
 
 func (b *Banner) ban(ip string) error {
-	b.bannedIPsMu.Lock()
-	b.bannedIPs[ip] = struct{}{}
-	b.bannedIPsMu.Unlock()
+	b.blacklistMu.Lock()
+	b.blacklist[ip] = struct{}{}
+	b.blacklistMu.Unlock()
 
 	if b.writer != nil {
 		b.writerMu.Lock()
@@ -133,18 +119,19 @@ func (b *Banner) ban(ip string) error {
 }
 
 // New banner enforcing a max failed requests per minute.
-func New(maxRPM float64) *Banner {
+func New(banThreshold int, dur time.Duration) *Banner {
 	b := &Banner{
-		lims:   map[string]*accessor{},
-		maxRPS: maxRPM / 60,
+		counts:       map[string]*counter{},
+		banThreshold: banThreshold,
+		duration:     dur,
 	}
 	return b
 }
 
-// WithBannedIPs starts the banner with a given state.
-func (b *Banner) WithBannedIPs(ips []string) *Banner {
+// WithBlacklist starts the banner with a given state of banned IPs.
+func (b *Banner) WithBlacklist(ips []string) *Banner {
 	for _, ip := range ips {
-		b.bannedIPs[ip] = struct{}{}
+		b.blacklist[ip] = struct{}{}
 	}
 	return b
 }
@@ -153,30 +140,4 @@ func (b *Banner) WithBannedIPs(ips []string) *Banner {
 func (b *Banner) WithStorage(w io.Writer) *Banner {
 	b.writer = w
 	return b
-}
-
-// WithPruningEvery removes unused limiters to free up memory. It runs every
-// given duration and prunes entries that haven't been accessed in 10*dur.
-func (b *Banner) WithPruningEvery(dur time.Duration) *Banner {
-	tick := time.NewTicker(dur)
-	go func() {
-		for {
-			select {
-			case now := <-tick.C:
-				b.pruneLimits(now, 10*dur)
-			}
-		}
-	}()
-	return b
-}
-
-func (b *Banner) pruneLimits(now time.Time, threshold time.Duration) {
-	b.limsMu.Lock()
-	defer b.limsMu.Unlock()
-
-	for ip, acc := range b.lims {
-		if now.After(acc.lastUsed.Add(threshold)) {
-			delete(b.lims, ip)
-		}
-	}
 }

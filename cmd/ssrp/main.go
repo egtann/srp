@@ -58,6 +58,11 @@ func main() {
 		usage(issues)
 		os.Exit(1)
 	}
+	whitelistIPs := []string{}
+	for ip := range reg {
+		whitelistIPs = append(whitelistIPs, ip)
+	}
+
 	rand.Seed(time.Now().UnixNano())
 
 	const bannedIPFile = "srp_banned_ips.txt"
@@ -76,16 +81,16 @@ func main() {
 	defer fi.Close()
 
 	lg := &Logger{}
-	ban := banner.New(2).
-		WithBannedIPs(bannedIPs).
-		WithStorage(fi).
-		WithPruningEvery(time.Minute)
+	ban := banner.New(100, 5*time.Minute).
+		WithBlacklist(bannedIPs).
+		WithWhitelist(whitelistIPs).
+		WithPurgeEvery(5 * time.Minute).
+		WithStorage(fi)
 	proxy := srp.NewProxy(lg, reg).
 		WithDirector(srp.RedirectHTTP).
 		WithDirector(srp.LogRequest(lg)).
 		WithDirector(ban.Monitor(lg)).
 		WithResponseModifier(ban.Record(lg))
-
 	srv := &http.Server{
 		Handler:        proxy,
 		ReadTimeout:    timeout,
