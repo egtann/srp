@@ -20,7 +20,7 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
-const timeout = 10 * time.Second
+const timeout = 30 * time.Second
 
 func main() {
 	portTmp := flag.String("p", "3000", "port")
