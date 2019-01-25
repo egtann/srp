@@ -210,6 +210,7 @@ func ping(job *healthCheck) error {
 }
 
 func newTransport(reg Registry) http.RoundTripper {
+	const timeout = 30 * time.Second
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		Dial: func(network, addr string) (net.Conn, error) {
@@ -242,8 +243,8 @@ func newTransport(reg Registry) http.RoundTripper {
 			return net.Dial(network, endpoint+":80")
 		},
 		MaxIdleConns:          100,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 10 * time.Second,
+		IdleConnTimeout:       timeout,
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
 	}
 }
