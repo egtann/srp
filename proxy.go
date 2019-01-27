@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"sync"
 	"time"
+
+	"github.com/rs/xid"
 )
 
 // ReverseProxy maps frontend hosts to backends. If HealthPath is set in the
@@ -40,6 +41,7 @@ type backend struct {
 // returning, i.e. the logging itself constitutes handling the error.
 type Logger interface {
 	Printf(format string, vals ...interface{})
+	ReqPrintf(reqID, format string, vals ...interface{})
 }
 
 type healthCheck struct {
@@ -55,7 +57,9 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 		req.URL.Scheme = "http"
 		req.URL.Host = req.Host
 		req.Header.Set("X-Real-IP", req.RemoteAddr)
-		log.Printf("%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
+		reqID := xid.New().String()
+		req.Header.Set("X-Request-ID", reqID)
+		log.ReqPrintf(reqID, "%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
 	}
 	transport := newTransport(reg)
 	errorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
@@ -168,12 +172,12 @@ func (r *ReverseProxy) CheckHealth() error {
 	for i := 0; i < len(checks); i++ {
 		check := <-r.resultCh
 		if check.err != nil {
-			log.Printf("check health: %s failed: %s\n", check.ip, check.err)
+			r.log.Printf("check health: %s failed: %s", check.ip, check.err)
 			continue
 		}
 		host := regClone[check.host]
 		host.liveBackends = append(host.liveBackends, check.ip)
-		log.Printf("check health: %s 200 OK\n", check.ip)
+		r.log.Printf("check health: %s 200 OK", check.ip)
 	}
 	r.UpdateRegistry(regClone)
 	return nil

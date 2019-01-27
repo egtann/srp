@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/egtann/srp"
 	"github.com/egtann/srp/gcloud/cache"
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -60,8 +60,12 @@ func main() {
 		os.Exit(1)
 	}
 	rand.Seed(time.Now().UnixNano())
-	proxy := srp.NewProxy(&Logger{}, reg)
 
+	zerolog.TimeFieldFormat = "" // Unix format
+	zerolog.TimestampFieldName = "ts"
+	zerolog.MessageFieldName = "msg"
+	log := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	proxy := srp.NewProxy(&logger{log: log}, reg)
 	srv := &http.Server{
 		Handler:        proxy,
 		ReadTimeout:    timeout,
@@ -70,10 +74,10 @@ func main() {
 	}
 	if len(*sslURL) > 0 {
 		hosts := append(reg.Hosts(), selfURL.Host)
-		log.Println("hosts", hosts)
-		c, err := cache.New(*bucket)
+		log.Info().Strs("hosts", hosts).Msg("got hosts")
+		c, err := cache.New(log, *bucket)
 		if err != nil {
-			log.Fatalf("new cache: %s", err)
+			log.Fatal().Err(err).Msg("new cache")
 		}
 		m := &autocert.Manager{
 			Cache:      c,
@@ -81,10 +85,10 @@ func main() {
 			HostPolicy: autocert.HostWhitelist(hosts...),
 		}
 		getCert := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			log.Printf("get cert for %s\n", hello.ServerName)
+			// log.Info().Str("server", hello.ServerName).Msg("get cert")
 			cert, err := m.GetCertificate(hello)
 			if err != nil {
-				log.Println("failed to get cert:", err)
+				log.Info().Err(err).Msg("failed to get cert")
 			}
 			return cert, err
 		}
@@ -92,46 +96,56 @@ func main() {
 		go func() {
 			err = http.ListenAndServe(":http", m.HTTPHandler(nil))
 			if err != nil {
-				log.Fatal(fmt.Printf("listen and serve: %s", err))
+				log.Fatal().Err(err).Msg("listen and serve http")
 			}
 		}()
 		port = "443"
 		srv.Addr = ":https"
 		go func() {
-			log.Println("serving tls")
+			log.Info().Msg("serving tls")
 			if err = srv.ListenAndServeTLS("", ""); err != nil {
-				log.Fatalln(err)
+				log.Fatal().Err(err).Msg("listen and serve tls")
 			}
 		}()
 	} else {
 		srv.Addr = ":" + port
 		go func() {
 			if err = srv.ListenAndServe(); err != nil {
-				log.Fatalln(err)
+				log.Fatal().Err(err).Msg("listen and serve")
 			}
 		}()
 	}
-	log.Println("listening on", port)
+	log.Info().Str("port", port).Msg("listening")
 	if err = proxy.CheckHealth(); err != nil {
-		log.Println("check health", err)
+		log.Info().Err(err).Msg("check health")
 	}
 	sighupCh := make(chan bool)
-	go hotReloadConfig(*config, proxy, sighupCh)
-	go checkHealth(proxy, sighupCh)
-	gracefulRestart(srv, timeout)
+	go hotReloadConfig(log, *config, proxy, sighupCh)
+	go checkHealth(log, proxy, sighupCh)
+	gracefulRestart(log, srv, timeout)
 }
 
-// Logger implements the srp.Logger interface.
-type Logger struct{}
+// logger implements the srp.Logger interface.
+type logger struct {
+	log zerolog.Logger
+}
 
-func (l *Logger) Printf(format string, vals ...interface{}) {
-	log.Printf(format, vals...)
+func (l *logger) Printf(format string, vals ...interface{}) {
+	l.log.Info().Msgf(format, vals...)
+}
+
+func (l *logger) ReqPrintf(reqID, format string, vals ...interface{}) {
+	l.log.Info().Str("req_id", reqID).Msgf(format, vals...)
 }
 
 // checkHealth of backend servers constantly. We cancel the current health
 // check when the reloaded channel receives a message, so a new health check
 // with the new registry can be started.
-func checkHealth(proxy *srp.ReverseProxy, sighupCh <-chan bool) {
+func checkHealth(
+	log zerolog.Logger,
+	proxy *srp.ReverseProxy,
+	sighupCh <-chan bool,
+) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -139,7 +153,7 @@ func checkHealth(proxy *srp.ReverseProxy, sighupCh <-chan bool) {
 		case <-ticker.C:
 			err := proxy.CheckHealth()
 			if err != nil {
-				log.Println("check health", err)
+				log.Info().Err(err).Msg("check health")
 			}
 		case <-sighupCh:
 			return
@@ -151,6 +165,7 @@ func checkHealth(proxy *srp.ReverseProxy, sighupCh <-chan bool) {
 // registry from the config file. This recursively calls itself, so it can
 // handle the signal multiple times.
 func hotReloadConfig(
+	log zerolog.Logger,
 	filename string,
 	proxy *srp.ReverseProxy,
 	sighupCh chan bool,
@@ -158,34 +173,38 @@ func hotReloadConfig(
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGHUP)
 	<-stop
-	log.Println("reloading config...")
+	log.Info().Msg("reloading config...")
 	reg, err := srp.NewRegistry(filename)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal().Err(err).Msg("reload registry")
 	}
 	proxy.UpdateRegistry(reg)
-	log.Println("reloaded config")
+	log.Info().Msg("reloaded config")
 	sighupCh <- true
-	go checkHealth(proxy, sighupCh)
-	hotReloadConfig(filename, proxy, sighupCh)
+	go checkHealth(log, proxy, sighupCh)
+	hotReloadConfig(log, filename, proxy, sighupCh)
 }
 
 // gracefulRestart listens for an interupt or terminate signal. When either is
 // received, it stops accepting new connections and allows all existing
 // connections up to 10 seconds to complete. If connections do not shut down in
 // time, this exits with 1.
-func gracefulRestart(srv *http.Server, timeout time.Duration) {
+func gracefulRestart(
+	log zerolog.Logger,
+	srv *http.Server,
+	timeout time.Duration,
+) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
-	log.Println("shutting down...")
+	log.Info().Msg("shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Println("failed to shutdown server gracefully", err)
+		log.Info().Err(err).Msg("failed to shutdown server gracefully")
 		os.Exit(1)
 	}
-	log.Println("shut down")
+	log.Info().Msg("shut down")
 }
 
 func usage(issues []string) {

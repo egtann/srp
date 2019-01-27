@@ -9,9 +9,9 @@ package cache
 import (
 	"context"
 	"io/ioutil"
-	"log"
 
 	"cloud.google.com/go/storage"
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -19,11 +19,12 @@ import (
 type Cache struct {
 	client *storage.Client
 	bucket string
+	log    zerolog.Logger
 }
 
 // New creates and initializes a new Cache backed by the given Google Cloud
 // Storage bucket.
-func New(bucket string) (*Cache, error) {
+func New(log zerolog.Logger, bucket string) (*Cache, error) {
 	client, err := storage.NewClient(context.Background())
 	if err != nil {
 		return nil, err
@@ -31,30 +32,32 @@ func New(bucket string) (*Cache, error) {
 	c := &Cache{
 		client: client,
 		bucket: bucket,
+		log:    log,
 	}
 	return c, nil
 }
 
 // Get certificate data from the specified object name.
 func (c *Cache) Get(ctx context.Context, name string) ([]byte, error) {
-	log.Println("get", name)
+	clog := c.log.With().Str("name", name).Logger()
+	// clog.Info().Msg("get cert")
 	r, err := c.client.Bucket(c.bucket).Object(name).NewReader(ctx)
 	if err == storage.ErrObjectNotExist {
-		log.Println("cache miss")
+		clog.Info().Msg("cache miss")
 		return nil, autocert.ErrCacheMiss
 	}
 	if err != nil {
-		log.Println("got err", err)
+		clog.Info().Err(err).Msg("failed to get cert")
 		return nil, err
 	}
-	log.Println("reading cert")
+	// clog.Info().Msg("reading cert")
 	defer r.Close()
 	return ioutil.ReadAll(r)
 }
 
 // Put the certificate data to the specified object name.
 func (c *Cache) Put(ctx context.Context, name string, data []byte) error {
-	log.Println("putting cert", name)
+	c.log.Info().Str("name", name).Msg("putting cert")
 	w := c.client.Bucket(c.bucket).Object(name).NewWriter(ctx)
 	w.Write(data)
 	return w.Close()
@@ -62,11 +65,12 @@ func (c *Cache) Put(ctx context.Context, name string, data []byte) error {
 
 // Delete the specified object name.
 func (c *Cache) Delete(ctx context.Context, name string) error {
-	log.Println("deleting cert", name)
+	clog := c.log.With().Str("name", name).Logger()
+	clog.Info().Msg("deleting cert")
 	o := c.client.Bucket(c.bucket).Object(name)
 	err := o.Delete(ctx)
 	if err == storage.ErrObjectNotExist {
-		log.Println("cert does not exist")
+		clog.Info().Msg("cert does not exist")
 		return nil
 	}
 	return err

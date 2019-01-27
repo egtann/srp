@@ -55,7 +55,7 @@ func main() {
 		os.Exit(1)
 	}
 	rand.Seed(time.Now().UnixNano())
-	proxy := srp.NewProxy(&Logger{}, reg)
+	proxy := srp.NewProxy(&logger{}, reg)
 
 	srv := &http.Server{
 		Handler:        proxy,
@@ -71,7 +71,7 @@ func main() {
 			HostPolicy: autocert.HostWhitelist(hosts...),
 		}
 		getCert := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			log.Printf("get cert for %s\n", hello.ServerName)
+			log.Printf("get cert for %s", hello.ServerName)
 			cert, err := m.GetCertificate(hello)
 			if err != nil {
 				log.Println("failed to get cert:", err)
@@ -111,10 +111,10 @@ func main() {
 	gracefulRestart(srv, timeout)
 }
 
-// Logger implements the srp.Logger interface.
-type Logger struct{}
+// logger implements the srp.Logger interface.
+type logger struct{}
 
-func (l *Logger) Printf(format string, vals ...interface{}) {
+func (l *logger) Printf(format string, vals ...interface{}) {
 	log.Printf(format, vals...)
 }
 
