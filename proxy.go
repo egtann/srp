@@ -57,8 +57,11 @@ func NewProxy(log Logger, reg Registry) *ReverseProxy {
 		req.URL.Scheme = "http"
 		req.URL.Host = req.Host
 		req.Header.Set("X-Real-IP", req.RemoteAddr)
-		reqID := xid.New().String()
-		req.Header.Set("X-Request-ID", reqID)
+		reqID := req.Header.Get("X-Request-ID")
+		if reqID == "" {
+			reqID = xid.New().String()
+			req.Header.Set("X-Request-ID", reqID)
+		}
 		log.ReqPrintf(reqID, "%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
 	}
 	transport := newTransport(reg)
