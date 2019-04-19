@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-cleanhttp"
 	"github.com/rs/xid"
 )
 
@@ -202,7 +203,8 @@ func ping(job *healthCheck) error {
 		return fmt.Errorf("new request: %s", err)
 	}
 	req.Header.Add("X-Role", "srp")
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := cleanhttp.DefaultClient()
+	client.Timeout = 10 * time.Second
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("do: %s", err)
