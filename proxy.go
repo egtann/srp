@@ -222,9 +222,8 @@ func ping(job *healthCheck) error {
 }
 
 func newTransport(reg Registry) http.RoundTripper {
-	const timeout = 30 * time.Second
 	transport := cleanhttp.DefaultTransport()
-	transport.ResponseHeaderTimeout = timeout
+	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.DialContext = func(
 		ctx context.Context,
 		network, addr string,
@@ -247,7 +246,7 @@ func newTransport(reg Registry) http.RoundTripper {
 func retryDial(network string, endpoints []string, tries int) (net.Conn, error) {
 	var err error
 	randInt := rand.Int()
-	for i := 0; i < max(len(endpoints), tries); i++ {
+	for i := 0; i < min(tries, len(endpoints)); i++ {
 		var conn net.Conn
 		endpoint := endpoints[(randInt+i)%len(endpoints)]
 		conn, err = net.Dial(network, endpoint+":80")
@@ -258,8 +257,8 @@ func retryDial(network string, endpoints []string, tries int) (net.Conn, error) 
 	return nil, fmt.Errorf("failed dial: %s", err.Error())
 }
 
-func max(i1, i2 int) int {
-	if i1 >= i2 {
+func min(i1, i2 int) int {
+	if i1 <= i2 {
 		return i1
 	}
 	return i2
