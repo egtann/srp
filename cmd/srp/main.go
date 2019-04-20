@@ -118,6 +118,10 @@ func (l *logger) Printf(format string, vals ...interface{}) {
 	log.Printf(format, vals...)
 }
 
+func (l *logger) ReqPrintf(reqID, format string, vals ...interface{}) {
+	log.Printf(reqID+": "+format, vals...)
+}
+
 // checkHealth of backend servers constantly. We cancel the current health
 // check when the reloaded channel receives a message, so a new health check
 // with the new registry can be started.

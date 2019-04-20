@@ -1,6 +1,7 @@
 package srp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"sync"
 	"time"
 
@@ -221,40 +223,44 @@ func ping(job *healthCheck) error {
 
 func newTransport(reg Registry) http.RoundTripper {
 	const timeout = 30 * time.Second
-	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		Dial: func(network, addr string) (net.Conn, error) {
-			// Trim training ":80"
-			if len(addr) <= 3 {
-				return nil, fmt.Errorf("invalid address %q", addr)
-			}
-			addrShort := addr[:len(addr)-3]
-			host, ok := reg[addrShort]
-			if !ok {
-				return nil, fmt.Errorf("no host for %s", addr)
-			}
-			endpoints := host.liveBackends
-			if len(endpoints) == 0 {
-				return nil, fmt.Errorf("no live backend for %s", addr)
-			}
-			randInt := rand.Int()
-			endpoint := endpoints[randInt%len(endpoints)]
-			conn, err := net.Dial(network, endpoint+":80")
-			if len(endpoints) < 2 || err == nil {
-				return conn, err
-			}
-			// Retry on other endpoints if there are multiple
-			endpoint = endpoints[(randInt+1)%len(endpoints)]
-			conn, err = net.Dial(network, endpoint+":80")
-			if len(endpoints) < 3 || err == nil {
-				return conn, err
-			}
-			endpoint = endpoints[(randInt+2)%len(endpoints)]
-			return net.Dial(network, endpoint+":80")
-		},
-		MaxIdleConns:          100,
-		IdleConnTimeout:       timeout,
-		TLSHandshakeTimeout:   timeout,
-		ResponseHeaderTimeout: timeout,
+	transport := cleanhttp.DefaultTransport()
+	transport.ResponseHeaderTimeout = timeout
+	transport.DialContext = func(
+		ctx context.Context,
+		network, addr string,
+	) (net.Conn, error) {
+		// Trim trailing port, if any
+		addrShort := strings.SplitN(addr, ":", 2)[0]
+		host, ok := reg[addrShort]
+		if !ok {
+			return nil, fmt.Errorf("no host for %s", addr)
+		}
+		endpoints := host.liveBackends
+		if len(endpoints) == 0 {
+			return nil, fmt.Errorf("no live backend for %s", addr)
+		}
+		return retryDial(network, endpoints, 3)
 	}
+	return transport
+}
+
+func retryDial(network string, endpoints []string, tries int) (net.Conn, error) {
+	var err error
+	randInt := rand.Int()
+	for i := 0; i < max(len(endpoints), tries); i++ {
+		var conn net.Conn
+		endpoint := endpoints[(randInt+i)%len(endpoints)]
+		conn, err = net.Dial(network, endpoint+":80")
+		if err == nil {
+			return conn, nil
+		}
+	}
+	return nil, fmt.Errorf("failed dial: %s", err.Error())
+}
+
+func max(i1, i2 int) int {
+	if i1 >= i2 {
+		return i1
+	}
+	return i2
 }
