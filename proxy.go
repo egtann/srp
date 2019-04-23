@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -104,12 +106,10 @@ func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.rp.ServeHTTP(w, req)
 }
 
-// NewRegistry for a given configuration file. This reports an error if any
-// frontend host has no backends.
-func NewRegistry(filename string) (Registry, error) {
-	byt, err := ioutil.ReadFile(filename)
+func newRegistry(r io.Reader) (Registry, error) {
+	byt, err := ioutil.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("read config file %q: %s", filename, err)
+		return nil, err
 	}
 	reg := Registry{}
 	err = json.Unmarshal(byt, &reg)
@@ -122,6 +122,17 @@ func NewRegistry(filename string) (Registry, error) {
 		}
 	}
 	return reg, nil
+}
+
+// NewRegistry for a given configuration file. This reports an error if any
+// frontend host has no backends.
+func NewRegistry(filename string) (Registry, error) {
+	fi, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("read file %s: %s", filename, err)
+	}
+	defer fi.Close()
+	return newRegistry(fi)
 }
 
 // Hosts for the registry.
