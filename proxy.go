@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -147,8 +148,15 @@ func (r Registry) Hosts() []string {
 func (r *ReverseProxy) cloneRegistry() Registry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	clone := make(Registry, len(r.reg))
-	for host, fe := range r.reg {
+	return cloneRegistryNoLock(r.reg)
+}
+
+// cloneRegistryNoLock returns a duplicate registry without acquiring locks.
+// Only to be used on existing clones within a single thread or where locking
+// is provided outside the function.
+func cloneRegistryNoLock(reg Registry) Registry {
+	clone := make(Registry, len(reg))
+	for host, fe := range reg {
 		cfe := &backend{
 			HealthPath: fe.HealthPath,
 			Backends:   make([]string, len(fe.Backends)),
@@ -157,14 +165,16 @@ func (r *ReverseProxy) cloneRegistry() Registry {
 		clone[host] = cfe
 	}
 	return clone
+
 }
 
 // CheckHealth of backend servers in the registry concurrently, and update the
 // registry so requests are only routed to healthy servers.
 func (r *ReverseProxy) CheckHealth() error {
 	checks := []*healthCheck{}
-	regClone := r.cloneRegistry()
-	for host, frontend := range regClone {
+	origReg := r.cloneRegistry()
+	newReg := cloneRegistryNoLock(origReg)
+	for host, frontend := range newReg {
 		if frontend.HealthPath == "" {
 			frontend.liveBackends = frontend.Backends
 			continue
@@ -192,12 +202,47 @@ func (r *ReverseProxy) CheckHealth() error {
 			r.log.Printf("check health: %s failed: %s", check.ip, check.err)
 			continue
 		}
-		host := regClone[check.host]
+		host := newReg[check.host]
 		host.liveBackends = append(host.liveBackends, check.ip)
 		r.log.Printf("check health: %s 200 OK", check.ip)
 	}
-	r.UpdateRegistry(regClone)
+
+	// Determine if the registry changed. If it's the same as before, we
+	// can exit early.
+	if !diff(origReg, newReg) {
+		return nil
+	}
+
+	// UpdateRegistry acquires a stop-the-world write lock, so we only call
+	// it when the new registry differs from the last one.
+	r.UpdateRegistry(newReg)
 	return nil
+}
+
+func diff(reg1, reg2 Registry) bool {
+	for key := range reg1 {
+		// Exit quickly if lengths are different
+		if len(reg1[key].liveBackends) != len(reg2[key].liveBackends) {
+			return true
+		}
+
+		// Sort our live backends to get better performance when
+		// diffing the live backends.
+		sort.Slice(reg1[key].liveBackends, func(i, j int) bool {
+			return reg1[key].liveBackends[i] < reg1[key].liveBackends[j]
+		})
+		sort.Slice(reg2[key].liveBackends, func(i, j int) bool {
+			return reg2[key].liveBackends[i] < reg2[key].liveBackends[j]
+		})
+
+		// Compare the two and exit on the first different string
+		for i, ip := range reg1[key].liveBackends {
+			if reg2[key].liveBackends[i] != ip {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // UpdateRegistry for the reverse proxy with new frontends, backends, and
