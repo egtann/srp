@@ -1,6 +1,7 @@
 package srp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +40,7 @@ type Registry map[string]*backend
 
 type backend struct {
 	HealthPath   string
+	ServicePath  string
 	Backends     []string
 	liveBackends []string
 }
@@ -150,8 +153,9 @@ func (r *ReverseProxy) cloneRegistry() Registry {
 	clone := make(Registry, len(r.reg))
 	for host, fe := range r.reg {
 		cfe := &backend{
-			HealthPath: fe.HealthPath,
-			Backends:   make([]string, len(fe.Backends)),
+			HealthPath:  fe.HealthPath,
+			ServicePath: fe.ServicePath,
+			Backends:    make([]string, len(fe.Backends)),
 		}
 		copy(cfe.Backends, fe.Backends)
 		clone[host] = cfe
@@ -163,8 +167,8 @@ func (r *ReverseProxy) cloneRegistry() Registry {
 // registry so requests are only routed to healthy servers.
 func (r *ReverseProxy) CheckHealth() error {
 	checks := []*healthCheck{}
-	regClone := r.cloneRegistry()
-	for host, frontend := range regClone {
+	newReg := r.cloneRegistry()
+	for host, frontend := range newReg {
 		if frontend.HealthPath == "" {
 			frontend.liveBackends = frontend.Backends
 			continue
@@ -192,12 +196,63 @@ func (r *ReverseProxy) CheckHealth() error {
 			r.log.Printf("check health: %s failed: %s", check.ip, check.err)
 			continue
 		}
-		host := regClone[check.host]
+		host := newReg[check.host]
 		host.liveBackends = append(host.liveBackends, check.ip)
 		r.log.Printf("check health: %s 200 OK", check.ip)
 	}
-	r.UpdateRegistry(regClone)
+
+	// Determine if the registry changed. If it's the same as before, we
+	// can exit early.
+	origReg := r.cloneRegistry()
+	if !diff(origReg, newReg) {
+		return nil
+	}
+
+	// TODO(egtann) can we speed perf by only calling this if something
+	// failed or was diff than last time? If the same, no need to Lock the
+	// registry. This is the only thing acquiring a Write lock.
+	r.UpdateRegistry(newReg)
+
+	// Notify all live backends of all the others at their ServicePaths
+	byt, err := json.Marshal(newReg)
+	if err != nil {
+		return fmt.Errorf("marshal json: %s", err)
+	}
+	for _, backend := range newReg {
+		for _, live := range backend.liveBackends {
+			err = updateServices(live, backend.ServicePath, byt)
+			if err != nil {
+				return fmt.Errorf("update services: %s", err)
+			}
+		}
+	}
 	return nil
+}
+
+func diff(reg1, reg2 Registry) bool {
+	for key := range reg1 {
+		// Exit quickly if lengths are different
+		if len(reg1[key].liveBackends) != len(reg2[key].liveBackends) {
+			return true
+		}
+
+		// Sort our live backends to get n*log(n) performance when diffing the
+		// live backends.
+		sort.Slice(reg1[key].liveBackends, func(i, j int) bool {
+			return reg1[key].liveBackends[i] < reg1[key].liveBackends[j]
+		})
+		sort.Slice(reg2[key].liveBackends, func(i, j int) bool {
+			return reg2[key].liveBackends[i] < reg2[key].liveBackends[j]
+		})
+
+		// Then compare the two and exit on the first different string
+		for j, ip := range reg1[key].liveBackends {
+			if reg2[key].liveBackends[j] != ip {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // UpdateRegistry for the reverse proxy with new frontends, backends, and
@@ -212,6 +267,29 @@ func (r *ReverseProxy) UpdateRegistry(reg Registry) {
 func ping(job *healthCheck) error {
 	target := "http://" + job.ip + job.healthPath
 	req, err := http.NewRequest("GET", target, nil)
+	if err != nil {
+		return fmt.Errorf("new request: %s", err)
+	}
+	req.Header.Add("X-Role", "srp")
+	client := cleanhttp.DefaultClient()
+	client.Timeout = 10 * time.Second
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("do: %s", err)
+	}
+	if err = resp.Body.Close(); err != nil {
+		return fmt.Errorf("close resp body: %s", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("expected status code 200, got %d",
+			resp.StatusCode)
+	}
+	return nil
+}
+
+func updateServices(ip, servicePath string, byt []byte) error {
+	target := "http://" + ip + servicePath
+	req, err := http.NewRequest("POST", target, bytes.NewReader(byt))
 	if err != nil {
 		return fmt.Errorf("new request: %s", err)
 	}
