@@ -115,7 +115,7 @@ func newRegistry(r io.Reader) (Registry, error) {
 	reg := Registry{}
 	err = json.Unmarshal(byt, &reg)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshal config: %s", err)
+		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 	for host, v := range reg {
 		if len(v.Backends) == 0 {
@@ -130,7 +130,7 @@ func newRegistry(r io.Reader) (Registry, error) {
 func NewRegistry(filename string) (Registry, error) {
 	fi, err := os.Open(filename)
 	if err != nil {
-		return nil, fmt.Errorf("read file %s: %s", filename, err)
+		return nil, fmt.Errorf("read file %s: %w", filename, err)
 	}
 	defer fi.Close()
 	return newRegistry(fi)
@@ -258,17 +258,17 @@ func ping(job *healthCheck) error {
 	target := "http://" + job.ip + job.healthPath
 	req, err := http.NewRequest("GET", target, nil)
 	if err != nil {
-		return fmt.Errorf("new request: %s", err)
+		return fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Add("X-Role", "srp")
 	client := cleanhttp.DefaultClient()
 	client.Timeout = 10 * time.Second
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("do: %s", err)
+		return fmt.Errorf("do: %w", err)
 	}
 	if err = resp.Body.Close(); err != nil {
-		return fmt.Errorf("close resp body: %s", err)
+		return fmt.Errorf("close resp body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("expected status code 200, got %d",
@@ -310,7 +310,7 @@ func retryDial(network string, endpoints []string, tries int) (net.Conn, error) 
 			return conn, nil
 		}
 	}
-	return nil, fmt.Errorf("failed dial: %s", err.Error())
+	return nil, fmt.Errorf("failed dial: %w", err)
 }
 
 func min(i1, i2 int) int {
