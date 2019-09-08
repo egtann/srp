@@ -12,7 +12,6 @@ import (
 	"net/http/httputil"
 	"os"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,7 +25,7 @@ import (
 // checks pass.
 type ReverseProxy struct {
 	rp       httputil.ReverseProxy
-	reg      Registry
+	reg      *Registry
 	jobCh    chan *healthCheck
 	resultCh chan *healthCheck
 	mu       sync.RWMutex
@@ -35,7 +34,12 @@ type ReverseProxy struct {
 
 // Registry maps hosts to backends with other helpful info, such as
 // healthchecks.
-type Registry map[string]*backend
+type Registry struct {
+	Services map[string]*backend
+	API      struct {
+		Subnet string
+	}
+}
 
 type backend struct {
 	HealthPath   string
@@ -58,7 +62,7 @@ type healthCheck struct {
 }
 
 // NewProxy from a given Registry.
-func NewProxy(log Logger, reg Registry) *ReverseProxy {
+func NewProxy(log Logger, reg *Registry) *ReverseProxy {
 	director := func(req *http.Request) {
 		req.URL.Scheme = "http"
 		req.URL.Host = req.Host
@@ -107,17 +111,17 @@ func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.rp.ServeHTTP(w, req)
 }
 
-func newRegistry(r io.Reader) (Registry, error) {
+func newRegistry(r io.Reader) (*Registry, error) {
 	byt, err := ioutil.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
-	reg := Registry{}
-	err = json.Unmarshal(byt, &reg)
+	reg := &Registry{}
+	err = json.Unmarshal(byt, reg)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
-	for host, v := range reg {
+	for host, v := range reg.Services {
 		if len(v.Backends) == 0 {
 			return nil, fmt.Errorf("missing backends for %q", host)
 		}
@@ -127,7 +131,7 @@ func newRegistry(r io.Reader) (Registry, error) {
 
 // NewRegistry for a given configuration file. This reports an error if any
 // frontend host has no backends.
-func NewRegistry(filename string) (Registry, error) {
+func NewRegistry(filename string) (*Registry, error) {
 	fi, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("read file %s: %w", filename, err)
@@ -137,15 +141,15 @@ func NewRegistry(filename string) (Registry, error) {
 }
 
 // Hosts for the registry.
-func (r Registry) Hosts() []string {
+func (r *Registry) Hosts() []string {
 	hosts := []string{}
-	for k := range r {
+	for k := range r.Services {
 		hosts = append(hosts, k)
 	}
 	return hosts
 }
 
-func (r *ReverseProxy) cloneRegistry() Registry {
+func (r *ReverseProxy) cloneRegistry() *Registry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return cloneRegistryNoLock(r.reg)
@@ -154,15 +158,18 @@ func (r *ReverseProxy) cloneRegistry() Registry {
 // cloneRegistryNoLock returns a duplicate registry without acquiring locks.
 // Only to be used on existing clones within a single thread or where locking
 // is provided outside the function.
-func cloneRegistryNoLock(reg Registry) Registry {
-	clone := make(Registry, len(reg))
-	for host, fe := range reg {
+func cloneRegistryNoLock(reg *Registry) *Registry {
+	clone := &Registry{
+		Services: make(map[string]*backend, len(reg.Services)),
+		API:      reg.API,
+	}
+	for host, fe := range reg.Services {
 		cfe := &backend{
 			HealthPath: fe.HealthPath,
 			Backends:   make([]string, len(fe.Backends)),
 		}
 		copy(cfe.Backends, fe.Backends)
-		clone[host] = cfe
+		clone.Services[host] = cfe
 	}
 	return clone
 
@@ -174,7 +181,7 @@ func (r *ReverseProxy) CheckHealth() error {
 	checks := []*healthCheck{}
 	origReg := r.cloneRegistry()
 	newReg := cloneRegistryNoLock(origReg)
-	for host, frontend := range newReg {
+	for host, frontend := range newReg.Services {
 		if frontend.HealthPath == "" {
 			frontend.liveBackends = frontend.Backends
 			continue
@@ -202,7 +209,7 @@ func (r *ReverseProxy) CheckHealth() error {
 			r.log.Printf("check health: %s failed: %s", check.ip, check.err)
 			continue
 		}
-		host := newReg[check.host]
+		host := newReg.Services[check.host]
 		host.liveBackends = append(host.liveBackends, check.ip)
 		r.log.Printf("check health: %s 200 OK", check.ip)
 	}
@@ -219,25 +226,23 @@ func (r *ReverseProxy) CheckHealth() error {
 	return nil
 }
 
-func diff(reg1, reg2 Registry) bool {
-	for key := range reg1 {
+func diff(reg1, reg2 *Registry) bool {
+	for key := range reg1.Services {
 		// Exit quickly if lengths are different
-		if len(reg1[key].liveBackends) != len(reg2[key].liveBackends) {
+		lb1 := reg1.Services[key].liveBackends
+		lb2 := reg2.Services[key].liveBackends
+		if len(lb1) != len(lb2) {
 			return true
 		}
 
 		// Sort our live backends to get better performance when
 		// diffing the live backends.
-		sort.Slice(reg1[key].liveBackends, func(i, j int) bool {
-			return reg1[key].liveBackends[i] < reg1[key].liveBackends[j]
-		})
-		sort.Slice(reg2[key].liveBackends, func(i, j int) bool {
-			return reg2[key].liveBackends[i] < reg2[key].liveBackends[j]
-		})
+		sort.Slice(lb1, func(i, j int) bool { return lb1[i] < lb1[j] })
+		sort.Slice(lb2, func(i, j int) bool { return lb2[i] < lb2[j] })
 
 		// Compare the two and exit on the first different string
-		for i, ip := range reg1[key].liveBackends {
-			if reg2[key].liveBackends[i] != ip {
+		for i, ip := range lb1 {
+			if lb2[i] != ip {
 				return true
 			}
 		}
@@ -247,7 +252,7 @@ func diff(reg1, reg2 Registry) bool {
 
 // UpdateRegistry for the reverse proxy with new frontends, backends, and
 // health checks.
-func (r *ReverseProxy) UpdateRegistry(reg Registry) {
+func (r *ReverseProxy) UpdateRegistry(reg *Registry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reg = reg
@@ -277,16 +282,18 @@ func ping(job *healthCheck) error {
 	return nil
 }
 
-func newTransport(reg Registry) http.RoundTripper {
+func newTransport(reg *Registry) http.RoundTripper {
 	transport := cleanhttp.DefaultTransport()
 	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.DialContext = func(
 		ctx context.Context,
 		network, addr string,
 	) (net.Conn, error) {
-		// Trim trailing port, if any
-		addrShort := strings.SplitN(addr, ":", 2)[0]
-		host, ok := reg[addrShort]
+		ip, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("split host port: %w", err)
+		}
+		host, ok := reg.Services[ip]
 		if !ok {
 			return nil, fmt.Errorf("no host for %s", addr)
 		}

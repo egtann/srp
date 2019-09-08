@@ -79,8 +79,15 @@ func main() {
 			return cert, err
 		}
 		srv.TLSConfig = &tls.Config{GetCertificate: getCert}
+
+		// Set up the API only if Subnet is configured and the internal
+		// IP of the SRP server can be determined.
+
+		// TODO finish
+		srp.APIHandler()
+
 		go func() {
-			err = http.ListenAndServe(":http", m.HTTPHandler(nil))
+			err = http.ListenAndServe(":http", m.HTTPHandler())
 			if err != nil {
 				log.Fatal(fmt.Printf("listen and serve: %s", err))
 			}
