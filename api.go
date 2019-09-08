@@ -11,12 +11,10 @@ import (
 	"strings"
 )
 
-type middleware func(http.ResponseWriter, *http.Request)
-
 // APIHandler returns nil if the whitelisted subnet hasn't been configured.
 // This design works well with autocert.HTTPHandler(fallback), which uses its
 // own fallback if fallback is nil.
-func (rp *ReverseProxy) APIHandler() (middleware, error) {
+func (rp *ReverseProxy) APIHandler() (http.Handler, error) {
 	reg := rp.cloneRegistry()
 	if reg.API.Subnet == "" {
 		return nil, nil
@@ -24,22 +22,13 @@ func (rp *ReverseProxy) APIHandler() (middleware, error) {
 	if localIP := getLocalIP(); localIP == "" {
 		return nil, nil
 	}
-	parts := strings.SplitN(reg.API.Subnet, "/", 2)
-	if len(parts) != 2 {
-		return nil, errors.New("bad subnet: expected ip/mask in the form of 10.1.2.0/24")
-	}
-	ip := net.ParseIP(parts[0])
-	maskBits, err := strconv.Atoi(parts[1])
+	maskedIP, mask, err := maskIP(reg.API.Subnet)
 	if err != nil {
-		return nil, fmt.Errorf("bad mask: %w", err)
+		return nil, fmt.Errorf("mask: %w", err)
 	}
-	mask := net.CIDRMask(maskBits, 32)
-	maskedIP := ip.Mask(mask)
-	if maskedIP.String() == "<nil>" {
-		return nil, fmt.Errorf("bad masked ip: %s", parts[0])
-	}
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" && r.Method != "HEAD" {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET", "HEAD":
 			http.Error(w, "Use HTTPS", http.StatusBadRequest)
 			return
 		}
@@ -48,7 +37,7 @@ func (rp *ReverseProxy) APIHandler() (middleware, error) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if maskedIP.String() == net.ParseIP(host).Mask(mask).String() {
+		if maskedIP == net.ParseIP(host).Mask(mask).String() {
 			if strings.TrimPrefix(r.URL.Path, "/") == "services" {
 				err := json.NewEncoder(w).Encode(rp.cloneRegistry())
 				if err != nil {
@@ -59,8 +48,7 @@ func (rp *ReverseProxy) APIHandler() (middleware, error) {
 		}
 		target := "https://" + stripPort(r.Host) + r.URL.RequestURI()
 		http.Redirect(w, r, target, http.StatusFound)
-	}
-	return handler, nil
+	}), nil
 }
 
 func stripPort(hostport string) string {
@@ -90,4 +78,22 @@ func getLocalIP() string {
 		}
 	}
 	return ""
+}
+
+func maskIP(subnet string) (string, net.IPMask, error) {
+	parts := strings.SplitN(subnet, "/", 2)
+	if len(parts) != 2 {
+		return "", nil, errors.New("bad subnet: expected ip/mask in the form of 10.1.2.0/24")
+	}
+	maskBits, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return "", nil, fmt.Errorf("bad mask: %w", err)
+	}
+	mask := net.CIDRMask(maskBits, 32)
+	ip := net.ParseIP(parts[0])
+	maskedIP := ip.Mask(mask).String()
+	if maskedIP == "<nil>" {
+		return "", nil, fmt.Errorf("bad masked ip: %s", parts[0])
+	}
+	return maskedIP, mask, nil
 }

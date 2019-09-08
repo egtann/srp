@@ -12,6 +12,7 @@ import (
 	"net/http/httputil"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,11 +141,13 @@ func NewRegistry(filename string) (*Registry, error) {
 	return newRegistry(fi)
 }
 
-// Hosts for the registry.
+// Hosts for the registry. This automatically removes *.internal domains.
 func (r *Registry) Hosts() []string {
 	hosts := []string{}
 	for k := range r.Services {
-		hosts = append(hosts, k)
+		if !strings.HasSuffix(k, ".internal") {
+			hosts = append(hosts, k)
+		}
 	}
 	return hosts
 }
@@ -312,7 +315,7 @@ func retryDial(network string, endpoints []string, tries int) (net.Conn, error) 
 	for i := 0; i < min(tries, len(endpoints)); i++ {
 		var conn net.Conn
 		endpoint := endpoints[(randInt+i)%len(endpoints)]
-		conn, err = net.Dial(network, endpoint+":80")
+		conn, err = net.Dial(network, net.JoinHostPort(endpoint, "80"))
 		if err == nil {
 			return conn, nil
 		}
