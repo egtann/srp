@@ -57,7 +57,11 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 	proxy := srp.NewProxy(&logger{}, reg)
 
+	// Set up the API only if Subnet is configured and the internal
+	// IP of the SRP server can be determined.
 	srv := &http.Server{
+		// TODO(egtann) wrap proxy to allow API requests over the
+		// whitelisted subnet
 		Handler:        proxy,
 		ReadTimeout:    timeout,
 		WriteTimeout:   timeout,
@@ -79,14 +83,18 @@ func main() {
 			return cert, err
 		}
 		srv.TLSConfig = &tls.Config{GetCertificate: getCert}
+		apiHandler, err := proxy.RedirectHTTPHandler()
+		if err != nil {
+			log.Fatal(err)
+		}
 		go func() {
-			err = http.ListenAndServe(":http", m.HTTPHandler(nil))
+			err = http.ListenAndServe(":80", m.HTTPHandler(apiHandler))
 			if err != nil {
 				log.Fatal(fmt.Printf("listen and serve: %s", err))
 			}
 		}()
 		port = "443"
-		srv.Addr = ":https"
+		srv.Addr = ":443"
 		go func() {
 			log.Println("serving tls")
 			if err = srv.ListenAndServeTLS("", ""); err != nil {
@@ -126,11 +134,9 @@ func (l *logger) ReqPrintf(reqID, format string, vals ...interface{}) {
 // check when the reloaded channel receives a message, so a new health check
 // with the new registry can be started.
 func checkHealth(proxy *srp.ReverseProxy, sighupCh <-chan bool) {
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case <-time.After(3 * time.Second):
 			err := proxy.CheckHealth()
 			if err != nil {
 				log.Println("check health", err)
@@ -152,6 +158,7 @@ func hotReloadConfig(
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGHUP)
 	<-stop
+
 	log.Println("reloading config...")
 	reg, err := srp.NewRegistry(filename)
 	if err != nil {
