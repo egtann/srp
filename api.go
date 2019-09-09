@@ -11,22 +11,32 @@ import (
 	"strings"
 )
 
-// APIHandler returns nil if the whitelisted subnet hasn't been configured.
-// This design works well with autocert.HTTPHandler(fallback), which uses its
-// own fallback if fallback is nil.
-func (rp *ReverseProxy) APIHandler() (http.Handler, error) {
+// RedirectHTTPHandler redirects http requests to use the API if the request
+// originated from the whitelisted subnet. In all other GET and HEAD requests,
+// this handler redirects to HTTPS. For POST, PUT, etc. this handler throws an
+// error letting the client know to use HTTPS.
+func (rp *ReverseProxy) RedirectHTTPHandler() (http.Handler, error) {
+	fn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET", "HEAD":
+			http.Error(w, "Use HTTPS", http.StatusBadRequest)
+			return
+		}
+		target := "https://" + stripPort(r.Host) + r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusFound)
+	})
 	reg := rp.cloneRegistry()
 	if reg.API.Subnet == "" {
-		return nil, nil
+		return fn, nil
 	}
 	if localIP := getLocalIP(); localIP == "" {
-		return nil, nil
+		return fn, nil
 	}
 	maskedIP, mask, err := maskIP(reg.API.Subnet)
 	if err != nil {
 		return nil, fmt.Errorf("mask: %w", err)
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fn = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET", "HEAD":
 			http.Error(w, "Use HTTPS", http.StatusBadRequest)
@@ -48,7 +58,8 @@ func (rp *ReverseProxy) APIHandler() (http.Handler, error) {
 		}
 		target := "https://" + stripPort(r.Host) + r.URL.RequestURI()
 		http.Redirect(w, r, target, http.StatusFound)
-	}), nil
+	})
+	return fn, nil
 }
 
 func stripPort(hostport string) string {

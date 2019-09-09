@@ -59,15 +59,10 @@ func main() {
 
 	// Set up the API only if Subnet is configured and the internal
 	// IP of the SRP server can be determined.
-	apiHandler, err := proxy.APIHandler()
-	if err != nil {
-		log.Fatal(err)
-	}
 	srv := &http.Server{
-		// TODO(egtann) figure out how to get proxy wrapped to support
-		// API calls. Will need a diff func than APIHandler to do it,
-		// since we don't want to redirect HTTPS.
-		Handler:        apiHandler,
+		// TODO(egtann) wrap proxy to allow API requests over the
+		// whitelisted subnet
+		Handler:        proxy,
 		ReadTimeout:    timeout,
 		WriteTimeout:   timeout,
 		MaxHeaderBytes: 1 << 20,
@@ -88,7 +83,10 @@ func main() {
 			return cert, err
 		}
 		srv.TLSConfig = &tls.Config{GetCertificate: getCert}
-
+		apiHandler, err := proxy.RedirectHTTPHandler()
+		if err != nil {
+			log.Fatal(err)
+		}
 		go func() {
 			err = http.ListenAndServe(":80", m.HTTPHandler(apiHandler))
 			if err != nil {
