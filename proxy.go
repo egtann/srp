@@ -105,29 +105,11 @@ func NewProxy(log Logger, reg *Registry) *ReverseProxy {
 	}
 }
 
-// ServeHTTP implements the http.RoundTripper interface.
 func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Only allow GET and HEAD requests to the API
-	switch req.Method {
-	case "GET", "HEAD":
-		if strings.TrimPrefix(req.URL.Path, "/") == "services" {
-			reg := cloneRegistryNoLock(r.reg)
-			for _, srv := range reg.Services {
-				// Only show live backends
-				srv.Backends = srv.liveBackends
-			}
-			err := json.NewEncoder(w).Encode(reg.Services)
-			if err != nil {
-				r.log.Printf("failed to encode registry: %s", err)
-			}
-			return
-		}
-	}
 	r.rp.ServeHTTP(w, req)
-	return
 }
 
 func newRegistry(r io.Reader) (*Registry, error) {

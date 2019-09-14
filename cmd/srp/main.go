@@ -62,7 +62,7 @@ func main() {
 	srv := &http.Server{
 		// TODO(egtann) wrap proxy to allow API requests over the
 		// whitelisted subnet
-		Handler:        proxy,
+		Handler:        proxy.Handler(),
 		ReadTimeout:    timeout,
 		WriteTimeout:   timeout,
 		MaxHeaderBytes: 1 << 20,
