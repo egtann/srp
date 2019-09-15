@@ -60,9 +60,7 @@ func main() {
 	// Set up the API only if Subnet is configured and the internal
 	// IP of the SRP server can be determined.
 	srv := &http.Server{
-		// TODO(egtann) wrap proxy to allow API requests over the
-		// whitelisted subnet
-		Handler:        proxy.Handler(),
+		Handler:        proxy,
 		ReadTimeout:    timeout,
 		WriteTimeout:   timeout,
 		MaxHeaderBytes: 1 << 20,
