@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hashicorp/go-cleanhttp"
+	cleanhttp "github.com/hashicorp/go-cleanhttp"
 	"github.com/rs/xid"
 )
 
@@ -316,7 +316,12 @@ func retryDial(network string, endpoints []string, tries int) (net.Conn, error) 
 	for i := 0; i < min(tries, len(endpoints)); i++ {
 		var conn net.Conn
 		endpoint := endpoints[(randInt+i)%len(endpoints)]
-		conn, err = net.Dial(network, net.JoinHostPort(endpoint, "80"))
+		host, port, err := net.SplitHostPort(endpoint)
+		if err != nil {
+			host = endpoint
+			port = "80"
+		}
+		conn, err = net.Dial(network, net.JoinHostPort(host, port))
 		if err == nil {
 			return conn, nil
 		}
