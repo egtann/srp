@@ -30,6 +30,14 @@ func main() {
 		usage([]string{})
 	}
 	flag.Parse()
+
+	if err := srp.Unveil(*config); err != nil {
+		log.Fatal(err)
+	}
+	if err := srp.Pledge(); err != nil {
+		log.Fatal(err)
+	}
+
 	issues := []string{}
 	port := strings.TrimLeft(*portTmp, ":")
 	portInt, err := strconv.Atoi(port)
