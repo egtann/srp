@@ -34,9 +34,6 @@ func main() {
 	if err := srp.Unveil(*config); err != nil {
 		log.Fatal(err)
 	}
-	if err := srp.Pledge(); err != nil {
-		log.Fatal(err)
-	}
 
 	issues := []string{}
 	port := strings.TrimLeft(*portTmp, ":")
@@ -110,10 +107,23 @@ func main() {
 	} else {
 		srv.Addr = ":" + port
 		go func() {
+			// Send 2 because we're listening for two
 			if err = srv.ListenAndServe(); err != nil {
 				log.Fatal(err)
 			}
 		}()
+	}
+
+	// Wait to give our listeners time to boot before pledging. We have to
+	// sleep because ListenAndServe hangs, so we can't send a signal on a
+	// channel after that -- only before, and before introduces a race
+	// condition which, under some circumstances, results in Pledge being
+	// called before ListenAndServe. When that happens, the kernel stops
+	// the program. That's why we sleep here, which is plenty of time for
+	// both servers to boot.
+	time.Sleep(time.Millisecond)
+	if err := srp.Pledge(); err != nil {
+		log.Fatal(err)
 	}
 	log.Println("listening on", port)
 	if err = proxy.CheckHealth(); err != nil {

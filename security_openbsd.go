@@ -7,7 +7,7 @@ import "golang.org/x/sys/unix"
 // of OpenBSD 6.6, though the program runs fine without the call, which is why
 // we add the `error` pledge.
 func Pledge() error {
-	const promises = "stdio rpath inet error"
+	const promises = "stdio rpath inet"
 	if err := unix.Pledge(promises, ""); err != nil {
 		return err
 	}
