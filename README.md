@@ -8,6 +8,7 @@ whole lot more.
 ## Features
 
 * Proxy requests from a host to one of many backend IPs/ports
+* Redirection to and from hosts
 * Automate HTTPS with TLS termination
 * Load balance using a simple algorithm
 * Check health automatically
@@ -28,13 +29,13 @@ Then run `srp -h` for usage help.
 
 The config file has two main parts:
 
-1. Services maps requests to backend services.
-1. API restricts access via an IP subnet.
+1. Services maps requests to backend services or redirects.
+1. API that restricts access via an IP subnet.
 
 ```json
 {
 	"Services": {
-		"127.0.0.1:3000": {
+		"www.example.com": {
 			"HealthPath": "/health",
 			"Backends": [
 				"127.0.0.1:3001",
@@ -43,6 +44,13 @@ The config file has two main parts:
 				"127.0.0.1:3004",
 				"127.0.0.1:3005"
 			]
+		},
+		"example.com": {
+			"Redirect": {
+				"URL": "https://www.example.com",
+				"DiscardPath": true,
+				"Permanent": true
+			}
 		}
 	},
 	"API": {

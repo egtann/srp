@@ -3,6 +3,7 @@ package srp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -36,16 +38,43 @@ type ReverseProxy struct {
 // Registry maps hosts to backends with other helpful info, such as
 // healthchecks.
 type Registry struct {
+	// Services maps hostnames to one of the following:
+	//
+	// * IPs with optional healthcheck paths, OR
+	// * A redirect to another hostname
 	Services map[string]*backend
-	API      struct {
-		Subnet string
-	}
+
+	// API restricts internal API access to a subnet, which should be an
+	// private LAN.
+	API struct{ Subnet string }
+}
+
+// redirect describes how SRP should redirect to another host.
+type redirect struct {
+	// URL to which SRP should redirect. If DiscardPath is false (the
+	// default), the URL's path will be overwritten.
+	URL string
+
+	// url is the parsed form of URL.
+	url *url.URL
+
+	// Permanent indicates whether the client should redirect itself in
+	// future requests. By default the redirect is temporary.
+	Permanent bool
+
+	// DiscardPath will strip any path for the URL while redirecting. By
+	// default the path is preserved.
+	DiscardPath bool
 }
 
 type backend struct {
 	HealthPath   string
 	Backends     []string
 	liveBackends []string
+
+	// Redirect from a given hostname to another. If provided, HealthPath
+	// and Backends MUST be empty.
+	Redirect *redirect
 }
 
 // Logger logs error messages for the caller where those errors don't require
@@ -73,7 +102,8 @@ func NewProxy(log Logger, reg *Registry) *ReverseProxy {
 			reqID = xid.New().String()
 			req.Header.Set("X-Request-ID", reqID)
 		}
-		log.ReqPrintf(reqID, "%s requested %s %s", req.RemoteAddr, req.Method, req.Host)
+		log.ReqPrintf(reqID, "%s requested %s %s", req.RemoteAddr,
+			req.Method, req.Host)
 	}
 	transport := newTransport(reg)
 	errorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
@@ -109,7 +139,28 @@ func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	// Handle redirects before proxying. Non-existent host errors will be
+	// handled by the reverse proxy, so we don't need to handle them here.
+	host, ok := r.reg.Services[req.Host]
+	if ok && host.Redirect != nil {
+		doRedirect(w, req, host.Redirect)
+		return
+	}
 	r.rp.ServeHTTP(w, req)
+}
+
+func doRedirect(w http.ResponseWriter, r *http.Request, rdr *redirect) {
+	uri := rdr.url
+	if rdr.DiscardPath {
+		uri.Path = ""
+	} else {
+		uri.Path = r.URL.Path
+	}
+	code := http.StatusTemporaryRedirect
+	if rdr.Permanent {
+		code = http.StatusPermanentRedirect
+	}
+	http.Redirect(w, r, uri.String(), code)
 }
 
 func newRegistry(r io.Reader) (*Registry, error) {
@@ -123,8 +174,28 @@ func newRegistry(r io.Reader) (*Registry, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 	for host, v := range reg.Services {
+		if host == "" {
+			return nil, errors.New("host cannot be empty")
+		}
+		if v.Redirect != nil {
+			if v.Redirect.URL == "" {
+				return nil, fmt.Errorf("%s: URL cannot be empty", host)
+			}
+			if len(v.Backends) > 0 {
+				return nil, fmt.Errorf("%s: Backends must be empty for redirect", host)
+			}
+			if v.HealthPath != "" {
+				return nil, fmt.Errorf("%s: HealthPath must be empty for redirect", host)
+			}
+			v.Redirect.url, err = url.Parse(v.Redirect.URL)
+			if err != nil {
+				return nil, fmt.Errorf("parse %s: %w",
+					v.Redirect.URL, err)
+			}
+			continue
+		}
 		if len(v.Backends) == 0 {
-			return nil, fmt.Errorf("missing backends for %q", host)
+			return nil, fmt.Errorf("%s: Backends cannot be empty", host)
 		}
 	}
 	return reg, nil
@@ -141,7 +212,8 @@ func NewRegistry(filename string) (*Registry, error) {
 	return newRegistry(fi)
 }
 
-// Hosts for the registry. This automatically removes *.internal domains.
+// Hosts for the registry suitable for generating HTTPS certificates. This
+// automatically removes *.internal domains.
 func (r *Registry) Hosts() []string {
 	hosts := []string{}
 	for k := range r.Services {
@@ -155,6 +227,7 @@ func (r *Registry) Hosts() []string {
 func (r *ReverseProxy) cloneRegistry() *Registry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
 	return cloneRegistryNoLock(r.reg)
 }
 
@@ -168,6 +241,7 @@ func cloneRegistryNoLock(reg *Registry) *Registry {
 	}
 	for host, fe := range reg.Services {
 		cfe := &backend{
+			Redirect:     fe.Redirect,
 			HealthPath:   fe.HealthPath,
 			Backends:     make([]string, len(fe.Backends)),
 			liveBackends: make([]string, len(fe.liveBackends)),
@@ -259,6 +333,7 @@ func diff(reg1, reg2 *Registry) bool {
 func (r *ReverseProxy) UpdateRegistry(reg *Registry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	r.reg = reg
 	r.rp.Transport = newTransport(reg)
 }
@@ -293,11 +368,11 @@ func newTransport(reg *Registry) http.RoundTripper {
 		ctx context.Context,
 		network, addr string,
 	) (net.Conn, error) {
-		ip, _, err := net.SplitHostPort(addr)
+		hostNoPort, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("split host port: %w", err)
 		}
-		host, ok := reg.Services[ip]
+		host, ok := reg.Services[hostNoPort]
 		if !ok {
 			return nil, fmt.Errorf("no host for %s", addr)
 		}
