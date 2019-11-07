@@ -8,6 +8,7 @@ whole lot more.
 ## Features
 
 * Proxy requests from a host to one of many backend IPs/ports
+* Redirection to and from hosts
 * Automate HTTPS with TLS termination
 * Load balance using a simple algorithm
 * Check health automatically
@@ -34,7 +35,7 @@ The config file has two main parts:
 ```json
 {
 	"Services": {
-		"127.0.0.1:3000": {
+		"www.example.com": {
 			"HealthPath": "/health",
 			"Backends": [
 				"127.0.0.1:3001",
@@ -43,6 +44,12 @@ The config file has two main parts:
 				"127.0.0.1:3004",
 				"127.0.0.1:3005"
 			]
+		},
+		"example.com": {
+			"Redirect": {
+				"URL": "https://www.example.com",
+				"StatusCode": 301
+			}
 		}
 	},
 	"API": {
