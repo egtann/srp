@@ -29,8 +29,8 @@ Then run `srp -h` for usage help.
 
 The config file has two main parts:
 
-1. Services maps requests to backend services.
-1. API restricts access via an IP subnet.
+1. Services maps requests to backend services or redirects.
+1. API that restricts access via an IP subnet.
 
 ```json
 {
@@ -48,7 +48,8 @@ The config file has two main parts:
 		"example.com": {
 			"Redirect": {
 				"URL": "https://www.example.com",
-				"StatusCode": 301
+				"DiscardPath": true,
+				"Permanent": true
 			}
 		}
 	},

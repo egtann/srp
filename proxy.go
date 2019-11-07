@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -58,9 +59,19 @@ type backend struct {
 	Redirect *Redirect
 }
 
+// Redirect describes how SRP should redirect to another host.
 type Redirect struct {
-	URL        string
-	StatusCode int
+	// URL to which SRP should redirect. If DiscardPath is false (the
+	// default), the URL's path will be overwritten.
+	URL url.URL
+
+	// Permanent indicates whether the client should redirect itself in
+	// future requests. By default the redirect is temporary.
+	Permanent bool
+
+	// DiscardPath will strip any path for the URL while redirecting. By
+	// default the path is preserved.
+	DiscardPath bool
 }
 
 // Logger logs error messages for the caller where those errors don't require
@@ -125,14 +136,26 @@ func (r *ReverseProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Handle redirects before proxying
+	// Handle redirects before proxying. Non-existent host errors will be
+	// handled by the reverse proxy, so we don't need to handle them here.
 	host, ok := r.reg.Services[req.URL.Host]
 	if ok && host.Redirect != nil {
-		http.Redirect(w, req, host.Redirect.URL,
-			host.Redirect.StatusCode)
+		redirect(w, req, host.Redirect)
 		return
 	}
 	r.rp.ServeHTTP(w, req)
+}
+
+func redirect(w http.ResponseWriter, r *http.Request, redirect *Redirect) {
+	uri := redirect.URL
+	if !redirect.DiscardPath {
+		uri.Path = r.URL.Path
+	}
+	code := http.StatusTemporaryRedirect
+	if redirect.Permanent {
+		code = http.StatusPermanentRedirect
+	}
+	http.Redirect(w, r, uri.String(), code)
 }
 
 func newRegistry(r io.Reader) (*Registry, error) {
