@@ -3,17 +3,18 @@
 SRP stands for Simple Reverse Proxy. It does what it says on the tin, and not a
 whole lot more.
 
-**Warning: this is alpha quality software and not ready for production.**
+It's been used in production to distribute traffic through a ~35 server
+architecture for 2 years with 100% uptime. YMMV.
 
 ## Features
 
 * Proxy requests from a host to one of many backend IPs/ports
-* Redirection to and from hosts
 * Automate HTTPS with TLS termination
 * Load balance using a simple algorithm
+* Redirect to and from hosts
 * Check health automatically
-* API to retrieve healthy services
-* Live reloaded config file
+* Retrieve healthy services with an internal API
+* 0-downtime config file reloads
 
 And nothing else.
 
@@ -76,7 +77,7 @@ without re-configuring your servers or modifying DNS.
 By default the API is disabled. When configured with `Subnet`, the API responds
 to `/services` over the appropriate subnet with JSON resembling the following:
 
-```
+```json
 {
 	"www.example.internal": {
 		"HealthPath": "/health",
