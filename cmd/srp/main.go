@@ -121,7 +121,7 @@ func main() {
 	// called before ListenAndServe. When that happens, the kernel stops
 	// the program. That's why we sleep here, which is plenty of time for
 	// both servers to boot.
-	time.Sleep(time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 	if err := srp.Pledge(); err != nil {
 		log.Fatal(err)
 	}
